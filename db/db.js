@@ -1,3 +1,6 @@
+// 
+
+
 const { Pool } = require('pg');
 
 const pool = new Pool({
@@ -6,6 +9,9 @@ const pool = new Pool({
   database: process.env.DB_DATABASE,
   password: process.env.DB_PASSWORD,
   port: process.env.DB_PORT,
+  ssl: {
+    rejectUnauthorized: true,
+  },
 });
 
 pool.query('SELECT NOW()', (err, res) => {
@@ -18,5 +24,5 @@ pool.query('SELECT NOW()', (err, res) => {
 
 module.exports = {
   query: (text, params) => pool.query(text, params),
-  pool // We'll use this for transactions
+  pool, // We'll use this for transactions
 };
