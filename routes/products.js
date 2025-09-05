@@ -229,7 +229,7 @@ router.post('/', async (req, res) => {
 
         const result = await db.query(
             `INSERT INTO products (name, description, price, min_stock_level, category, image_url, is_active, units)
-             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb) RETURNING *`,
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb) RETURNING *`,
             [name, description, price, min_stock_level, category, image_url, is_active, unitsJson]
         );
         res.status(201).json(result.rows[0]);
