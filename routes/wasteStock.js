@@ -13,7 +13,7 @@ router.get('/', async (req, res) => {
       LEFT JOIN users u ON ws.recorded_by = u.id
       ORDER BY ws.date_recorded DESC
     `);
-    
+
     console.log(`Found ${result.rows.length} waste records`);
     res.json(result.rows);
   } catch (err) {
@@ -35,27 +35,27 @@ router.get('/:id', async (req, res) => {
     `, [id]);
     
     if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Waste stock record not found' });
+      return res.status(404).json({ error: 'Waste stock entry not found' });
     }
     
     res.json(result.rows[0]);
   } catch (err) {
-    console.error('Error fetching waste stock:', err);
-    res.status(500).json({ error: 'Failed to fetch waste stock record' });
+    console.error('Error fetching waste stock entry:', err);
+    res.status(500).json({ error: 'Failed to fetch waste stock entry' });
   }
 });
 
-// POST new waste stock entry
+// POST a new waste stock entry
 router.post('/', async (req, res) => {
   let client;
   try {
     const { product_id, quantity, reason, notes } = req.body;
-    
+
     // --- Step 1: Add more robust input validation ---
     if (!product_id || !quantity || isNaN(Number(quantity)) || Number(quantity) <= 0) {
       return res.status(400).json({ error: 'Product ID must be a valid integer, and quantity must be a positive number.' });
     }
-    
+
     // --- Step 2: Ensure product_id is an integer for database query ---
     const parsedProductId = parseInt(product_id);
     const parsedQuantity = parseInt(quantity);
@@ -76,7 +76,7 @@ router.post('/', async (req, res) => {
       }
       recorded_by = userResult.rows[0].id;
     }
-    
+
     // Check if the product exists in inventory
     const inventoryResult = await client.query(`
       SELECT quantity FROM inventory WHERE product_id = $1
@@ -86,13 +86,13 @@ router.post('/', async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Product not found in inventory. Please ensure the product exists before creating a waste record.' });
     }
-    
+
     const currentStock = inventoryResult.rows[0].quantity;
     if (currentStock < parsedQuantity) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Insufficient stock to create a waste record of this quantity.' });
     }
-    
+
     console.log('Creating waste record:', { product_id: parsedProductId, quantity: parsedQuantity, reason, notes, recorded_by });
 
     // --- Step 3: Use the parsed integer values in the query ---
@@ -110,29 +110,29 @@ router.post('/', async (req, res) => {
       SET quantity = quantity - $1
       WHERE product_id = $2
     `, [parsedQuantity, parsedProductId]);
-    
+
     await client.query('COMMIT');
-    
+
     console.log('Waste record created successfully:', newWasteRecord);
     res.status(201).json(newWasteRecord);
-    
+
   } catch (err) {
     // --- Step 4: Add specific logging for the server-side error ---
     if (client) {
       await client.query('ROLLBACK');
     }
-    
+
     // Check if the error is due to a foreign key violation
     if (err.code === '23503') { // PostgreSQL error code for foreign key violation
       console.error('Foreign Key Violation Error:', err.detail);
       return res.status(400).json({ error: 'Failed to create waste record due to a foreign key constraint violation. Please check the provided product ID and recorded_by user ID.' });
     }
-    
+
     // Catch any other unexpected server errors
     console.error('Error creating waste stock entry:', err);
-    res.status(500).json({ 
-      error: 'Failed to create waste stock record.', 
-      details: err.message 
+    res.status(500).json({
+      error: 'Failed to create waste stock record.',
+      details: err.message
     });
   } finally {
     if (client) {
@@ -141,115 +141,12 @@ router.post('/', async (req, res) => {
   }
 });
 
-// PUT update waste stock entry
-router.put('/:id', async (req, res) => {
-  let client;
-  try {
-    const { id } = req.params;
-    const { product_id, quantity, reason, notes } = req.body;
-
-    console.log('Updating waste record:', { id, product_id, quantity, reason, notes });
-
-    // Validate input
-    if (!product_id || !quantity || quantity <= 0) {
-      return res.status(400).json({ error: 'Product ID and valid quantity are required' });
-    }
-
-    // Get the original record
-    client = await db.connect();
-    await client.query('BEGIN');
-
-    // Get user ID for recording
-    let recorded_by = req.user?.id;
-    if (!recorded_by) {
-      const userResult = await client.query(`
-        SELECT id FROM users WHERE is_active = true LIMIT 1
-      `);
-      
-      if (userResult.rows.length === 0) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'No active users found to record this update' });
-      }
-      
-      recorded_by = userResult.rows[0].id;
-    }
-
-    const originalRecordResult = await client.query(`
-      SELECT * FROM waste_stock WHERE id = $1
-    `, [id]);
-
-    if (originalRecordResult.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Waste stock record not found' });
-    }
-
-    const originalRecord = originalRecordResult.rows[0];
-    const quantityDifference = quantity - originalRecord.quantity;
-
-    // Check current inventory stock if we're increasing the waste quantity
-    if (quantityDifference > 0) {
-      const inventoryResult = await client.query(`
-        SELECT quantity FROM inventory WHERE product_id = $1
-      `, [product_id]);
-
-      if (inventoryResult.rows.length === 0) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Product not found in inventory' });
-      }
-
-      const currentStock = inventoryResult.rows[0].quantity;
-
-      if (currentStock < quantityDifference) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ 
-          error: `Insufficient stock. Only ${currentStock} units available to add to waste.` 
-        });
-      }
-    }
-
-    // Update waste stock record
-    const wasteResult = await client.query(`
-      UPDATE waste_stock 
-      SET quantity = $1, reason = $2, notes = $3, recorded_by = $4, date_recorded = CURRENT_TIMESTAMP
-      WHERE id = $5
-      RETURNING *
-    `, [quantity, reason, notes, recorded_by, id]);
-
-    // Update inventory (adjust stock based on quantity difference)
-    await client.query(`
-      UPDATE inventory 
-      SET quantity = quantity - $1
-      WHERE product_id = $2
-    `, [quantityDifference, product_id]);
-
-    await client.query('COMMIT');
-
-    console.log('Waste record updated successfully:', wasteResult.rows[0]);
-    res.json(wasteResult.rows[0]);
-  } catch (err) {
-    console.error('Error updating waste stock record:', err);
-    
-    if (client) {
-      await client.query('ROLLBACK');
-    }
-    
-    res.status(500).json({ 
-      error: 'Failed to update waste stock record',
-      details: err.message 
-    });
-  } finally {
-    if (client) {
-      client.release();
-    }
-  }
-});
-
-// DELETE waste stock entry
+// DELETE a waste stock entry by ID
 router.delete('/:id', async (req, res) => {
   let client;
   try {
     const { id } = req.params;
-    
+
     console.log('Deleting waste record:', id);
 
     // First get the waste record to restore inventory
@@ -259,42 +156,39 @@ router.delete('/:id', async (req, res) => {
     const wasteResult = await client.query(`
       SELECT * FROM waste_stock WHERE id = $1
     `, [id]);
-    
+
     if (wasteResult.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Waste stock record not found' });
     }
-    
+
     const wasteRecord = wasteResult.rows[0];
-    
+
     // Restore inventory
     await client.query(`
-      UPDATE inventory 
+      UPDATE inventory
       SET quantity = quantity + $1
       WHERE product_id = $2
     `, [wasteRecord.quantity, wasteRecord.product_id]);
-    
+
     // Delete waste record
     await client.query(`
-      DELETE FROM waste_stock 
+      DELETE FROM waste_stock
       WHERE id = $1
     `, [id]);
-    
+
     await client.query('COMMIT');
-    
+
     console.log('Waste record deleted successfully');
     res.json({ message: 'Waste stock record deleted successfully' });
   } catch (err) {
     console.error('Error deleting waste stock record:', err);
-    
+
     if (client) {
       await client.query('ROLLBACK');
     }
-    
-    res.status(500).json({ 
-      error: 'Failed to delete waste stock record',
-      details: err.message 
-    });
+
+    res.status(500).json({ error: 'Failed to delete waste stock record' });
   } finally {
     if (client) {
       client.release();
