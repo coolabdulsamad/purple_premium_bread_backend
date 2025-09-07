@@ -51,11 +51,6 @@ router.post('/', async (req, res) => {
   try {
     const { product_id, quantity, reason, notes } = req.body;
     
-    // Use a default user ID if not provided (you might want to get this from authentication)
-    const recorded_by = req.user?.id || 1;
-    
-    console.log('Creating waste record:', { product_id, quantity, reason, notes, recorded_by });
-
     // Validate input
     if (!product_id || !quantity || quantity <= 0) {
       return res.status(400).json({ error: 'Product ID and valid quantity are required' });
@@ -66,6 +61,24 @@ router.post('/', async (req, res) => {
     
     // Start transaction
     await client.query('BEGIN');
+
+    // First, check if we have a valid user to record this waste
+    let recorded_by = req.user?.id;
+    if (!recorded_by) {
+      // Try to get the first active user from the database
+      const userResult = await client.query(`
+        SELECT id FROM users WHERE is_active = true LIMIT 1
+      `);
+      
+      if (userResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'No active users found to record this waste entry' });
+      }
+      
+      recorded_by = userResult.rows[0].id;
+    }
+
+    console.log('Creating waste record:', { product_id, quantity, reason, notes, recorded_by });
 
     // Check current inventory stock
     const inventoryResult = await client.query(`
@@ -128,7 +141,6 @@ router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { product_id, quantity, reason, notes } = req.body;
-    const recorded_by = req.user?.id || 1;
 
     console.log('Updating waste record:', { id, product_id, quantity, reason, notes });
 
@@ -140,6 +152,21 @@ router.put('/:id', async (req, res) => {
     // Get the original record
     client = await db.connect();
     await client.query('BEGIN');
+
+    // Get user ID for recording
+    let recorded_by = req.user?.id;
+    if (!recorded_by) {
+      const userResult = await client.query(`
+        SELECT id FROM users WHERE is_active = true LIMIT 1
+      `);
+      
+      if (userResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'No active users found to record this update' });
+      }
+      
+      recorded_by = userResult.rows[0].id;
+    }
 
     const originalRecordResult = await client.query(`
       SELECT * FROM waste_stock WHERE id = $1
