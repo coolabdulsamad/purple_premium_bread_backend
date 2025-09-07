@@ -117,4 +117,75 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
+// PUT update waste stock entry
+router.put('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { product_id, quantity, reason, notes } = req.body;
+    const recorded_by = req.user?.id || 1;
+
+    // Validate input
+    if (!product_id || !quantity || quantity <= 0) {
+      return res.status(400).json({ error: 'Product ID and valid quantity are required' });
+    }
+
+    // Get the original record
+    const originalRecordResult = await db.query(`
+      SELECT * FROM waste_stock WHERE id = $1
+    `, [id]);
+
+    if (originalRecordResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Waste stock record not found' });
+    }
+
+    const originalRecord = originalRecordResult.rows[0];
+    const quantityDifference = quantity - originalRecord.quantity;
+
+    // Check current inventory stock if we're increasing the waste quantity
+    if (quantityDifference > 0) {
+      const inventoryResult = await db.query(`
+        SELECT quantity FROM inventory WHERE product_id = $1
+      `, [product_id]);
+
+      if (inventoryResult.rows.length === 0) {
+        return res.status(400).json({ error: 'Product not found in inventory' });
+      }
+
+      const currentStock = inventoryResult.rows[0].quantity;
+
+      if (currentStock < quantityDifference) {
+        return res.status(400).json({ 
+          error: `Insufficient stock. Only ${currentStock} units available to add to waste.` 
+        });
+      }
+    }
+
+    // Start transaction
+    await db.query('BEGIN');
+
+    // Update waste stock record
+    const wasteResult = await db.query(`
+      UPDATE waste_stock 
+      SET quantity = $1, reason = $2, notes = $3, recorded_by = $4, date_recorded = CURRENT_TIMESTAMP
+      WHERE id = $5
+      RETURNING *
+    `, [quantity, reason, notes, recorded_by, id]);
+
+    // Update inventory (adjust stock based on quantity difference)
+    await db.query(`
+      UPDATE inventory 
+      SET quantity = quantity - $1
+      WHERE product_id = $2
+    `, [quantityDifference, product_id]);
+
+    await db.query('COMMIT');
+
+    res.json(wasteResult.rows[0]);
+  } catch (err) {
+    await db.query('ROLLBACK');
+    console.error('Error updating waste stock record:', err);
+    res.status(500).json({ error: 'Failed to update waste stock record' });
+  }
+});
+
 module.exports = router;
