@@ -94,7 +94,7 @@ router.delete('/:id', async (req, res) => {
     // Start transaction
     await db.query('BEGIN');
 
-    // Restore inventory
+    // Restore inventory 
     await db.query(`
       UPDATE inventory 
       SET quantity = quantity + $1
