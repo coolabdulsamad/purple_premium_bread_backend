@@ -54,6 +54,23 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'Product ID and valid quantity are required' });
     }
     
+    // Check current inventory stock
+    const inventoryResult = await db.query(`
+      SELECT quantity FROM inventory WHERE product_id = $1
+    `, [product_id]);
+    
+    if (inventoryResult.rows.length === 0) {
+      return res.status(400).json({ error: 'Product not found in inventory' });
+    }
+    
+    const currentStock = inventoryResult.rows[0].quantity;
+    
+    if (currentStock < quantity) {
+      return res.status(400).json({ 
+        error: `Insufficient stock. Only ${currentStock} units available.` 
+      });
+    }
+    
     // Start transaction
     await db.query('BEGIN');
     
@@ -86,18 +103,38 @@ router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     
-    const result = await db.query(`
-      DELETE FROM waste_stock 
-      WHERE id = $1 
-      RETURNING *
+    // First get the waste record to restore inventory
+    const wasteResult = await db.query(`
+      SELECT * FROM waste_stock WHERE id = $1
     `, [id]);
     
-    if (result.rows.length === 0) {
+    if (wasteResult.rows.length === 0) {
       return res.status(404).json({ error: 'Waste stock record not found' });
     }
     
+    const wasteRecord = wasteResult.rows[0];
+    
+    // Start transaction
+    await db.query('BEGIN');
+    
+    // Restore inventory
+    await db.query(`
+      UPDATE inventory 
+      SET quantity = quantity + $1
+      WHERE product_id = $2
+    `, [wasteRecord.quantity, wasteRecord.product_id]);
+    
+    // Delete waste record
+    await db.query(`
+      DELETE FROM waste_stock 
+      WHERE id = $1
+    `, [id]);
+    
+    await db.query('COMMIT');
+    
     res.json({ message: 'Waste stock record deleted successfully' });
   } catch (err) {
+    await db.query('ROLLBACK');
     console.error('Error deleting waste stock record:', err);
     res.status(500).json({ error: 'Failed to delete waste stock record' });
   }
