@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db/db');
 
-// GET all waste stock entries  
+// GET all waste stock entries 
 router.get('/', async (req, res) => {
   try {
     const result = await db.query(`
