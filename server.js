@@ -26,6 +26,7 @@ const staffRoutes = require('./routes/staff'); // ✨ Add this line
 const dashboardRoutes = require('./routes/dashboard'); // ✨ Add this line
 const reportsRoutes = require('./routes/reports'); // ✨ Add this line
 const analysisRoutes = require('./routes/analysis'); // ✨ Add this line
+const wasteStock = require('./routes/wasteStock');
 
 
 const app = express();
@@ -58,6 +59,7 @@ app.use('/api/staff', staffRoutes); // ✨ Add this line
 app.use('/api/dashboard', dashboardRoutes); // ✨ Add this line
 app.use('/api/reports', reportsRoutes); // ✨ Add this line
 app.use('/api/analysis', analysisRoutes); // ✨ Add this line
+app.use('/api/waste-stock', wasteStock);
 
 // Simple test route
 app.get('/', (req, res) => {
