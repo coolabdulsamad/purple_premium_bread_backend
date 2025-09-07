@@ -51,81 +51,87 @@ router.post('/', async (req, res) => {
   try {
     const { product_id, quantity, reason, notes } = req.body;
     
-    // Validate input
-    if (!product_id || !quantity || quantity <= 0) {
-      return res.status(400).json({ error: 'Product ID and valid quantity are required' });
+    // --- Step 1: Add more robust input validation ---
+    if (!product_id || !quantity || isNaN(Number(quantity)) || Number(quantity) <= 0) {
+      return res.status(400).json({ error: 'Product ID must be a valid integer, and quantity must be a positive number.' });
     }
-
-    // Get a client from the pool for transaction
-    client = await db.connect();
     
-    // Start transaction
+    // --- Step 2: Ensure product_id is an integer for database query ---
+    const parsedProductId = parseInt(product_id);
+    const parsedQuantity = parseInt(quantity);
+
+    // Get a client from the pool for a transaction
+    client = await db.connect();
     await client.query('BEGIN');
 
     // First, check if we have a valid user to record this waste
     let recorded_by = req.user?.id;
     if (!recorded_by) {
-      // Try to get the first active user from the database
       const userResult = await client.query(`
         SELECT id FROM users WHERE is_active = true LIMIT 1
       `);
-      
       if (userResult.rows.length === 0) {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: 'No active users found to record this waste entry' });
       }
-      
       recorded_by = userResult.rows[0].id;
     }
-
-    console.log('Creating waste record:', { product_id, quantity, reason, notes, recorded_by });
-
-    // Check current inventory stock
+    
+    // Check if the product exists in inventory
     const inventoryResult = await client.query(`
       SELECT quantity FROM inventory WHERE product_id = $1
-    `, [product_id]);
-    
+    `, [parsedProductId]);
+
     if (inventoryResult.rows.length === 0) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Product not found in inventory' });
+      return res.status(400).json({ error: 'Product not found in inventory. Please ensure the product exists before creating a waste record.' });
     }
     
     const currentStock = inventoryResult.rows[0].quantity;
-    
-    if (currentStock < quantity) {
+    if (currentStock < parsedQuantity) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ 
-        error: `Insufficient stock. Only ${currentStock} units available.` 
-      });
+      return res.status(400).json({ error: 'Insufficient stock to create a waste record of this quantity.' });
     }
+    
+    console.log('Creating waste record:', { product_id: parsedProductId, quantity: parsedQuantity, reason, notes, recorded_by });
 
-    // Insert waste stock record
-    const wasteResult = await client.query(`
+    // --- Step 3: Use the parsed integer values in the query ---
+    const insertResult = await client.query(`
       INSERT INTO waste_stock (product_id, quantity, reason, notes, recorded_by)
       VALUES ($1, $2, $3, $4, $5)
-      RETURNING *
-    `, [product_id, quantity, reason, notes, recorded_by]);
+      RETURNING *;
+    `, [parsedProductId, parsedQuantity, reason, notes, recorded_by]);
 
-    // Update inventory (reduce stock)
+    const newWasteRecord = insertResult.rows[0];
+
+    // Update inventory
     await client.query(`
-      UPDATE inventory 
+      UPDATE inventory
       SET quantity = quantity - $1
       WHERE product_id = $2
-    `, [quantity, product_id]);
-
+    `, [parsedQuantity, parsedProductId]);
+    
     await client.query('COMMIT');
     
-    console.log('Waste record created successfully:', wasteResult.rows[0]);
-    res.status(201).json(wasteResult.rows[0]);
-  } catch (err) {
-    console.error('Error creating waste stock record:', err);
+    console.log('Waste record created successfully:', newWasteRecord);
+    res.status(201).json(newWasteRecord);
     
+  } catch (err) {
+    // --- Step 4: Add specific logging for the server-side error ---
     if (client) {
       await client.query('ROLLBACK');
     }
     
+    // Check if the error is due to a foreign key violation
+    if (err.code === '23503') { // PostgreSQL error code for foreign key violation
+      console.error('Foreign Key Violation Error:', err.detail);
+      return res.status(400).json({ error: 'Failed to create waste record due to a foreign key constraint violation. Please check the provided product ID and recorded_by user ID.' });
+    }
+    
+    // Catch any other unexpected server errors
+    console.error('Error creating waste stock entry:', err);
     res.status(500).json({ 
-      error: 'Failed to create waste stock record',
+      error: 'Failed to create waste stock record.', 
       details: err.message 
     });
   } finally {
