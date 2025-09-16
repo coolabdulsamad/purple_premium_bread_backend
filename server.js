@@ -33,7 +33,12 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Middleware
-app.use(cors());
+// app.use(cors());
+app.use(cors({
+  origin: 'https://purple-premium-bread.vercel.app',
+  credentials: true // Optional: only if using cookies/sessions
+}));
+
 app.use(express.json());
 app.use(fileUpload());
 
