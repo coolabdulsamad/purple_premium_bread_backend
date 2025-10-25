@@ -81,7 +81,7 @@ const startServer = async () => {
             // Schedule Automated Alert Generation
             checkAndGenerateAlerts();
             setInterval(checkAndGenerateAlerts, 3 * 60 * 1000); // Every 5 minutes
-            console.log('Automated alert generation scheduled.');
+            // console.log('Automated alert generation scheduled.');
         });
     } catch (err) {
         console.error('Failed to start server:', err); // Error message adjusted as DB connection is implicitly handled
