@@ -175,7 +175,7 @@ router.post('/process', async (req, res) => {
         // --- STEP 4: Record the Sale ---
         const saleInsertQuery = `
             INSERT INTO sales_transactions (
-                subtotal, tax, total, discount_amount, cashier_id, 
+                subtotal, tax, total_amount, discount_amount, cashier_id, 
                 payment_method, customer_id, note, payment_reference, 
                 payment_image_url, status, amount_paid, balance_due, due_date, 
                 total_cogs
