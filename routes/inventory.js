@@ -110,11 +110,29 @@ router.post('/manage-user-stock', async (req, res) => {
             );
             
             // 3. Log the Transaction (Optional but highly recommended for audit)
-            await client.query(
-                `INSERT INTO stock_issue_log (product_id, user_id, type, quantity, recorded_by)
-                 VALUES ($1, $2, $3, $4, $5)`,
-                [productId, userId, type, quantity, adminId]
-            );
+// In purple-premium-bread-api/routes/inventory.js, inside POST /api/inventory/manage-user-stock
+
+// 3. Log the Transaction (Optional but highly recommended for audit)
+// Fix the column names in the INSERT query to match the corrected schema
+await client.query(
+    `INSERT INTO stock_issue_log (
+        product_id, 
+        issue_type,
+        from_user_id, 
+        to_user_id, 
+        quantity_changed, 
+        recorded_by
+    )
+     VALUES ($1, $2, $3, $4, $5, $6)`, // Updated number of parameters
+    [
+        productId, 
+        type, // This is the issue_type_enum value (e.g., 'ISSUE', 'RETURN')
+        (type === 'ISSUE' ? adminId : userId), // Example: If ISSUING, from admin to user.
+        (type === 'ISSUE' ? userId : adminId), // Example: If RETURNING, from user to admin.
+        quantity, 
+        adminId // The manager/admin who recorded the action
+    ]
+);
         }
 
         await client.query('COMMIT');
