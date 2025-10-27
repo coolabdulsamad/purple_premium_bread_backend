@@ -286,4 +286,57 @@ router.delete('/:id', async (req, res) => {
     }
 });
 
+// NEW: GET /api/products/with-stock-source/:userId
+router.get('/with-stock-source/:userId', async (req, res) => {
+    const { userId } = req.params;
+    try {
+        // 1. Check user's stock source preference and role
+        const userResult = await db.query(`SELECT role, load_from_demo_stock FROM users WHERE id = $1`, [userId]);
+        if (userResult.rowCount === 0) {
+            return res.status(404).json({ error: 'User not found.' });
+        }
+        
+        const user = userResult.rows[0];
+        let query = '';
+        const params = [];
+
+        if (user.role === 'sales' && user.load_from_demo_stock) {
+            // 2. Fetch from Sales User Stock
+            query = `
+                SELECT 
+                    p.id, p.name, p.description, p.price, p.image_url, p.category, 
+                    COALESCE(sus.quantity, 0) as quantity, 
+                    'user_stock' as source
+                FROM 
+                    products p
+                LEFT JOIN 
+                    sales_user_stock sus ON p.id = sus.product_id AND sus.user_id = $1
+                WHERE p.is_active = TRUE
+                ORDER BY p.name ASC;
+            `;
+            params.push(userId);
+        } else {
+            // 3. Fetch from Main Inventory (Default for all other cases)
+            query = `
+                SELECT 
+                    p.id, p.name, p.description, p.price, p.image_url, p.category, 
+                    COALESCE(i.quantity, 0) as quantity, 
+                    'main_inventory' as source
+                FROM 
+                    products p
+                LEFT JOIN 
+                    inventory i ON p.id = i.product_id
+                WHERE p.is_active = TRUE
+                ORDER BY p.name ASC;
+            `;
+        }
+        
+        const result = await db.query(query, params);
+        res.status(200).json(result.rows);
+    } catch (error) {
+        console.error('Error fetching products with stock source:', error);
+        res.status(500).json({ error: 'Failed to fetch products with stock source.', details: error.message });
+    }
+});
+
 module.exports = router;

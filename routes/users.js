@@ -160,4 +160,59 @@ router.get('/me', authenticate, async (req, res) => {
     }
 });
 
+// NEW: GET /api/users/sales-accounts - Fetch all sales users and their allocated stock
+router.get('/sales-accounts', async (req, res) => {
+    try {
+        const query = `
+            SELECT 
+                u.id, 
+                u.fullname, 
+                u.username, 
+                u.load_from_demo_stock,
+                COALESCE(
+                    json_agg(json_build_object(
+                        'product_id', sus.product_id,
+                        'product_name', p.name,
+                        'quantity', sus.quantity
+                    ) ORDER BY p.name) FILTER (WHERE sus.product_id IS NOT NULL), 
+                    '[]'
+                ) AS allocated_stock
+            FROM 
+                users u
+            LEFT JOIN 
+                sales_user_stock sus ON u.id = sus.user_id
+            LEFT JOIN 
+                products p ON sus.product_id = p.id
+            WHERE u.role = 'sales'
+            GROUP BY u.id
+            ORDER BY u.fullname ASC;
+        `;
+        const result = await db.query(query);
+        res.status(200).json(result.rows);
+    } catch (error) {
+        console.error('Error fetching sales accounts:', error);
+        res.status(500).json({ error: 'Failed to fetch sales accounts.', details: error.message });
+    }
+});
+
+// NEW: PUT /api/users/toggle-demo-stock/:userId - Toggle the load_from_demo_stock flag
+router.put('/toggle-demo-stock/:userId', async (req, res) => {
+    const { userId } = req.params;
+    const { load_from_demo_stock } = req.body; // Expect a boolean: true or false
+
+    try {
+        const result = await db.query(
+            `UPDATE users SET load_from_demo_stock = $1 WHERE id = $2 RETURNING id, fullname, load_from_demo_stock`,
+            [load_from_demo_stock, userId]
+        );
+        if (result.rowCount === 0) {
+            return res.status(404).json({ message: 'Sales user not found.' });
+        }
+        res.status(200).json(result.rows[0]);
+    } catch (error) {
+        console.error('Error toggling demo stock setting:', error);
+        res.status(500).json({ error: 'Failed to update setting.', details: error.message });
+    }
+});
+
 module.exports = router;

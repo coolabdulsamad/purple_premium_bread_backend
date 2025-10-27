@@ -75,6 +75,59 @@ router.get('/detailed', async (req, res) => {
     }
 });
 
+// NEW: POST /api/inventory/manage-user-stock - Issue or return stock from a sales user
+router.post('/manage-user-stock', async (req, res) => {
+    const { adminId, userId, type, products } = req.body; // type: 'issue' or 'return', products: {productId: quantity, ...}
+
+    if (!['issue', 'return'].includes(type)) {
+        return res.status(400).json({ error: 'Invalid operation type.' });
+    }
+
+    const client = await db.pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        for (const productIdStr in products) {
+            const productId = parseInt(productIdStr);
+            const quantity = parseInt(products[productIdStr]);
+            if (quantity <= 0) continue;
+
+            // 1. Update Main Inventory
+            const invAdjustment = type === 'issue' ? -quantity : quantity;
+            await client.query(
+                `UPDATE inventory SET quantity = quantity + $1, last_updated = NOW() WHERE product_id = $2`,
+                [invAdjustment, productId]
+            );
+
+            // 2. Update Sales User Stock (Insert or Update)
+            const userStockAdjustment = type === 'issue' ? quantity : -quantity;
+            await client.query(
+                `INSERT INTO sales_user_stock (user_id, product_id, quantity, last_updated)
+                 VALUES ($1, $2, $3, NOW())
+                 ON CONFLICT (user_id, product_id) 
+                 DO UPDATE SET quantity = sales_user_stock.quantity + $3, last_updated = NOW()`,
+                [userId, productId, userStockAdjustment]
+            );
+            
+            // 3. Log the Transaction (Optional but highly recommended for audit)
+            await client.query(
+                `INSERT INTO stock_issue_log (product_id, user_id, type, quantity, recorded_by)
+                 VALUES ($1, $2, $3, $4, $5)`,
+                [productId, userId, type, quantity, adminId]
+            );
+        }
+
+        await client.query('COMMIT');
+        res.status(200).json({ message: `Stock ${type} successful.` });
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error(`Error managing user stock (${type}):`, error.message);
+        res.status(500).json({ error: `Failed to ${type} stock.`, details: error.message });
+    } finally {
+        client.release();
+    }
+});
+
 // GET /api/inventory - Original simple endpoint (can be kept or removed)
 // router.get('/', async (req, res) => {
 //     try {

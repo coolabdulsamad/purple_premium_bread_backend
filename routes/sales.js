@@ -75,135 +75,166 @@ router.post('/upload-receipt', async (req, res) => {
     }
 });
 
-// POST /api/sales/process - Process a standard retail sale
+// POST /api/sales/process - Process a sale (UPDATED for Dynamic Stock Source and Free Stock)
 router.post('/process', async (req, res) => {
-    const {
-        cart,
-        subtotal,
-        tax,
-        total,
-        cashierId,
-        paymentMethod,
-        customerId,
-        discountAmount,
-        note,
-        paymentReference,
-        paymentImageUrl,
-        // New credit sale fields
-        status, // e.g., 'Paid', 'Pending Payment', 'Partially Paid'
-        amountPaid,
-        balanceDue,
-        dueDate
+    const { 
+        cart, subtotal, tax, total, discountAmount, 
+        cashierId, paymentMethod, customerId, note, 
+        paymentReference, paymentImageUrl, status, 
+        amountPaid, balanceDue, dueDate,
+        freeStock // NEW: The free stock object from the frontend
     } = req.body;
-    const client = await db.pool.connect();
 
+    const client = await db.pool.connect();
     try {
         await client.query('BEGIN');
 
-        let transactionTotalCogs = 0; // To accumulate COGS for the entire transaction
+        // --- STEP 1: Determine Stock Source ---
+        let stockTable = 'inventory';
+        let stockCheckQuery = 'SELECT quantity FROM inventory WHERE product_id = $1 FOR UPDATE';
+        let stockUpdateQuery = `UPDATE inventory SET quantity = quantity - $1, last_updated = NOW() WHERE product_id = $2 RETURNING *`;
+        
+        const userResult = await client.query(`
+            SELECT role, load_from_demo_stock 
+            FROM users 
+            WHERE id = $1
+        `, [cashierId]);
+        
+        const user = userResult.rows[0];
+        if (user && user.role === 'sales' && user.load_from_demo_stock) {
+            stockTable = 'sales_user_stock';
+            // Use a LEFT JOIN/COALESCE to ensure we check for existence
+            stockCheckQuery = `
+                SELECT COALESCE(sus.quantity, 0) as quantity 
+                FROM products p 
+                LEFT JOIN sales_user_stock sus ON p.id = sus.product_id AND sus.user_id = $2 
+                WHERE p.id = $1 
+                FOR UPDATE
+            `;
+            stockUpdateQuery = `
+                UPDATE sales_user_stock 
+                SET quantity = quantity - $1, last_updated = NOW() 
+                WHERE product_id = $2 AND user_id = $3
+                RETURNING *
+            `;
+        }
+        
+        // --- STEP 2: Aggregate All Products (Sold + Free) and Pre-check Stock ---
+        const productsToUpdate = {}; // {productId: totalQuantityToDeduct (sold + free)}
+        let totalCogs = 0;
 
-        // 1. Validate stock and calculate COGS for each item in the cart beforehand
-        const processedCartItems = [];
+        // Add sold items
         for (const item of cart) {
-            // Check stock
-            const stockCheckQuery = 'SELECT quantity FROM inventory WHERE product_id = $1';
-            const stockCheckResult = await client.query(stockCheckQuery, [item.id]);
-            if (stockCheckResult.rows.length === 0 || stockCheckResult.rows[0].quantity < item.quantity) {
-                throw new Error(`Insufficient stock for product: ${item.name}. Available: ${stockCheckResult.rows.length > 0 ? stockCheckResult.rows[0].quantity : 0}, Requested: ${item.quantity}.`);
-            }
-
-            // Calculate COGS per unit for the product
-            const cogsPerUnit = await calculateProductCogs(item.id, client);
-            processedCartItems.push({ ...item, cogs_per_unit: cogsPerUnit });
-            transactionTotalCogs += cogsPerUnit * item.quantity;
+            const productId = item.id;
+            const quantity = item.quantity;
+            productsToUpdate[productId] = (productsToUpdate[productId] || 0) + quantity;
+            
+            // Calculate COGS for sold items
+            const cogsPerUnit = await calculateProductCogs(productId, client);
+            totalCogs += cogsPerUnit * quantity;
         }
 
-        // Calculate total profit for the transaction
-        const transactionTotalProfit = total - transactionTotalCogs;
+        // Add free items (if applicable)
+        if (freeStock && freeStock.quantities) {
+            for (const [productIdStr, freeQty] of Object.entries(freeStock.quantities)) {
+                const productId = parseInt(productIdStr);
+                if (freeQty > 0) {
+                    productsToUpdate[productId] = (productsToUpdate[productId] || 0) + freeQty;
+                }
+            }
+        }
+        
+        // Final Stock Check
+        for (const [productId, quantityToDeduct] of Object.entries(productsToUpdate)) {
+            let checkParams = [productId];
+            if (stockTable === 'sales_user_stock') {
+                checkParams.push(cashierId);
+            }
+            const checkResult = await client.query(stockCheckQuery, checkParams);
+            const availableStock = checkResult.rows[0]?.quantity || 0;
 
-        // 2. Create a sales transaction with all necessary details, including COGS and profit
-        const saleQuery = `
-            INSERT INTO sales_transactions (
-                subtotal,
-                tax_amount,
-                total_amount,
-                cashier_id,
-                payment_method,
-                customer_id,
-                transaction_type,
-                discount_amount,
-                note,
-                payment_reference,
-                payment_image_url,
-                status,
-                amount_paid,
-                balance_due,
-                due_date,
-                total_cogs,     -- New: total COGS for the transaction
-                total_profit    -- New: total profit for the transaction
+            if (quantityToDeduct > availableStock) {
+                // Fetch product name for better error
+                const product = await client.query('SELECT name FROM products WHERE id = $1', [productId]);
+                const productName = product.rows[0]?.name || `Product ID ${productId}`;
+
+                throw new Error(`Insufficient stock for ${productName} in ${stockTable}. Needed: ${quantityToDeduct}, Available: ${availableStock}`);
+            }
+        }
+
+        // --- STEP 3: Record the Sale ---
+        const saleInsertQuery = `
+            INSERT INTO sales (
+                subtotal, tax, total, discount_amount, cashier_id, 
+                payment_method, customer_id, note, payment_reference, 
+                payment_image_url, status, amount_paid, balance_due, due_date,
+                total_cogs
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             RETURNING id;
         `;
 
-        const saleResult = await client.query(saleQuery, [
-            subtotal,
-            tax,
-            total,
-            cashierId,
-            paymentMethod,
-            customerId,
-            'Retail', // Default type, can be dynamic later
-            discountAmount,
-            note,
-            paymentReference,
-            paymentImageUrl,
-            status,
-            amountPaid,
-            balanceDue,
-            dueDate,
-            transactionTotalCogs,   // Pass calculated COGS
-            transactionTotalProfit  // Pass calculated profit
+        const saleResult = await client.query(saleInsertQuery, [
+            subtotal, tax, total, discountAmount, cashierId, 
+            paymentMethod, customerId, note, paymentReference, 
+            paymentImageUrl, status, amountPaid, balanceDue, dueDate,
+            totalCogs
         ]);
-        const salesId = saleResult.rows[0].id;
+        const saleId = saleResult.rows[0].id;
 
-        // 3. Insert each item into sales_items & update inventory
-        const itemPromises = processedCartItems.map(async item => {
-            const itemQuery = `
-                INSERT INTO sales_items (sale_id, product_id, quantity, price_at_sale, cost_at_sale) -- New: cost_at_sale
-                VALUES ($1, $2, $3, $4, $5);
-            `;
-            await client.query(itemQuery, [salesId, item.id, item.quantity, item.price, item.cogs_per_unit]);
-
-            // Update finished product inventory (deduct)
-            const inventoryUpdateQuery = `
-                UPDATE inventory
-                SET quantity = quantity - $1, last_updated = NOW()
-                WHERE product_id = $2; -- Stock was already checked, so no need for AND quantity >= $1
-            `;
-            await client.query(inventoryUpdateQuery, [item.quantity, item.id]);
-        });
-
-        await Promise.all(itemPromises);
-
-        // 4. Handle credit sales and customer balance (only if balanceDue > 0 after initial payment)
-        if (paymentMethod === 'Credit' && customerId && balanceDue > 0) {
-            const customerUpdateQuery = `
-                UPDATE customers
-                SET balance = balance + $1, updated_at = NOW()
-                WHERE id = $2;
-            `;
-            const customerUpdateResult = await client.query(customerUpdateQuery, [balanceDue, customerId]);
-            if (customerUpdateResult.rowCount === 0) {
-                throw new Error('Failed to update customer balance. Customer not found.');
-            }
+        // --- STEP 4: Record Sale Items ---
+        const itemsInsertQuery = `
+            INSERT INTO sales_items (sale_id, product_id, quantity, unit_price, discount_applied)
+            VALUES ($1, $2, $3, $4, $5);
+        `;
+        for (const item of cart) {
+            await client.query(itemsInsertQuery, [
+                saleId, item.id, item.quantity, item.price, item.discount || 0
+            ]);
         }
 
+        // --- STEP 5: Deduct Stock (Sold + FREE) ---
+        for (const [productId, quantityToDeduct] of Object.entries(productsToUpdate)) {
+            let updateParams = [quantityToDeduct, productId];
+            if (stockTable === 'sales_user_stock') {
+                updateParams.push(cashierId); // Add user_id for the sales_user_stock table
+            }
+            const updateResult = await client.query(stockUpdateQuery, updateParams);
+             // Error check for update is crucial if it's the sales_user_stock table and the row didn't exist
+            if (updateResult.rowCount === 0 && stockTable === 'sales_user_stock') {
+                 // Attempt to create the row if it didn't exist (e.g., if a new item was allocated but no initial sale was made)
+                 const insertQuery = `
+                    INSERT INTO sales_user_stock (user_id, product_id, quantity)
+                    VALUES ($1, $2, -($3)) 
+                    ON CONFLICT (user_id, product_id) DO UPDATE 
+                    SET quantity = EXCLUDED.quantity 
+                    RETURNING *;
+                `; // This is complex, better to enforce initial stock on issue. Re-try update only.
+                // Given the pre-check, an update failure means a serious data issue.
+                throw new Error(`Critical update error for Product ID ${productId} in ${stockTable}.`);
+            }
+        }
+        
+        // --- STEP 6: Log Free Stock (NEW LOGIC) ---
+        if (freeStock && freeStock.quantities) {
+            const { quantities, reason } = freeStock;
+            const logQuery = `
+                INSERT INTO free_stock_log (sale_id, product_id, quantity, reason, recorded_by)
+                VALUES ($1, $2, $3, $4, $5);
+            `;
+            for (const [productIdStr, quantity] of Object.entries(quantities)) {
+                const productId = parseInt(productIdStr);
+                if (quantity > 0) {
+                    await client.query(logQuery, [saleId, productId, quantity, reason, cashierId]);
+                }
+            }
+        }
+        
         await client.query('COMMIT');
-        res.status(201).json({ message: 'Sale processed successfully.', salesId: salesId });
+        res.status(201).json({ message: 'Sale processed successfully', saleId });
     } catch (error) {
         await client.query('ROLLBACK');
-        console.error('Error processing sale:', error);
+        console.error('Sale Processing Error:', error.message);
         res.status(500).json({ error: 'Failed to process sale.', details: error.message });
     } finally {
         client.release();
