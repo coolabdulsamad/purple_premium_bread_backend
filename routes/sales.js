@@ -75,7 +75,7 @@ router.post('/upload-receipt', async (req, res) => {
     }
 });
 
-// POST /api/sales/process - Process a sale (UPDATED for Dynamic Stock Source and Free Stock)
+// POST /api/sales/process - Process a sale (UPDATED & FIXED FOR FOR UPDATE ERROR)
 router.post('/process', async (req, res) => {
     const { 
         cart, subtotal, tax, total, discountAmount, 
@@ -92,35 +92,42 @@ router.post('/process', async (req, res) => {
         // --- STEP 1: Determine Stock Source ---
         let stockTable = 'inventory';
         let stockCheckQuery = 'SELECT quantity FROM inventory WHERE product_id = $1 FOR UPDATE';
-        let stockUpdateQuery = `UPDATE inventory SET quantity = quantity - $1, last_updated = NOW() WHERE product_id = $2 RETURNING *`;
-        
+        let stockUpdateQuery = `
+            UPDATE inventory 
+            SET quantity = quantity - $1, last_updated = NOW() 
+            WHERE product_id = $2 
+            RETURNING *;
+        `;
+
         const userResult = await client.query(`
             SELECT role, load_from_demo_stock 
             FROM users 
             WHERE id = $1
         `, [cashierId]);
-        
+
         const user = userResult.rows[0];
+
         if (user && user.role === 'sales' && user.load_from_demo_stock) {
             stockTable = 'sales_user_stock';
-            // Use a LEFT JOIN/COALESCE to ensure we check for existence
+
+            // ✅ FIXED: Directly lock sales_user_stock (no LEFT JOIN)
             stockCheckQuery = `
-                SELECT COALESCE(sus.quantity, 0) as quantity 
-                FROM products p 
-                LEFT JOIN sales_user_stock sus ON p.id = sus.product_id AND sus.user_id = $2 
-                WHERE p.id = $1 
-                FOR UPDATE
+                SELECT quantity 
+                FROM sales_user_stock 
+                WHERE product_id = $1 AND user_id = $2 
+                FOR UPDATE;
             `;
+
             stockUpdateQuery = `
                 UPDATE sales_user_stock 
                 SET quantity = quantity - $1, last_updated = NOW() 
                 WHERE product_id = $2 AND user_id = $3
-                RETURNING *
+                RETURNING *;
             `;
         }
-        
+
         // --- STEP 2: Aggregate All Products (Sold + Free) and Pre-check Stock ---
-        const productsToUpdate = {}; // {productId: totalQuantityToDeduct (sold + free)}
+        const productsToUpdate = {}; // { productId: totalQuantityToDeduct (sold + free) }
         let totalCogs = 0;
 
         // Add sold items
@@ -128,7 +135,7 @@ router.post('/process', async (req, res) => {
             const productId = item.id;
             const quantity = item.quantity;
             productsToUpdate[productId] = (productsToUpdate[productId] || 0) + quantity;
-            
+
             // Calculate COGS for sold items
             const cogsPerUnit = await calculateProductCogs(productId, client);
             totalCogs += cogsPerUnit * quantity;
@@ -143,34 +150,38 @@ router.post('/process', async (req, res) => {
                 }
             }
         }
-        
-        // Final Stock Check
+
+        // --- STEP 3: Final Stock Check (Locking Safely) ---
         for (const [productId, quantityToDeduct] of Object.entries(productsToUpdate)) {
             let checkParams = [productId];
             if (stockTable === 'sales_user_stock') {
                 checkParams.push(cashierId);
             }
+
             const checkResult = await client.query(stockCheckQuery, checkParams);
             const availableStock = checkResult.rows[0]?.quantity || 0;
 
             if (quantityToDeduct > availableStock) {
-                // Fetch product name for better error
+                // Fetch product name for better error message
                 const product = await client.query('SELECT name FROM products WHERE id = $1', [productId]);
                 const productName = product.rows[0]?.name || `Product ID ${productId}`;
 
-                throw new Error(`Insufficient stock for ${productName} in ${stockTable}. Needed: ${quantityToDeduct}, Available: ${availableStock}`);
+                throw new Error(
+                    `Insufficient stock for ${productName} in ${stockTable}. Needed: ${quantityToDeduct}, Available: ${availableStock}`
+                );
             }
         }
 
-        // --- STEP 3: Record the Sale ---
+        // --- STEP 4: Record the Sale ---
         const saleInsertQuery = `
             INSERT INTO sales (
                 subtotal, tax, total, discount_amount, cashier_id, 
                 payment_method, customer_id, note, payment_reference, 
-                payment_image_url, status, amount_paid, balance_due, due_date,
+                payment_image_url, status, amount_paid, balance_due, due_date, 
                 total_cogs
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 
+                    $11, $12, $13, $14, $15)
             RETURNING id;
         `;
 
@@ -182,7 +193,7 @@ router.post('/process', async (req, res) => {
         ]);
         const saleId = saleResult.rows[0].id;
 
-        // --- STEP 4: Record Sale Items ---
+        // --- STEP 5: Record Sale Items ---
         const itemsInsertQuery = `
             INSERT INTO sales_items (sale_id, product_id, quantity, unit_price, discount_applied)
             VALUES ($1, $2, $3, $4, $5);
@@ -193,29 +204,22 @@ router.post('/process', async (req, res) => {
             ]);
         }
 
-        // --- STEP 5: Deduct Stock (Sold + FREE) ---
+        // --- STEP 6: Deduct Stock (Sold + Free) ---
         for (const [productId, quantityToDeduct] of Object.entries(productsToUpdate)) {
             let updateParams = [quantityToDeduct, productId];
             if (stockTable === 'sales_user_stock') {
-                updateParams.push(cashierId); // Add user_id for the sales_user_stock table
+                updateParams.push(cashierId);
             }
+
             const updateResult = await client.query(stockUpdateQuery, updateParams);
-             // Error check for update is crucial if it's the sales_user_stock table and the row didn't exist
+
+            // Ensure update succeeded (for sales_user_stock)
             if (updateResult.rowCount === 0 && stockTable === 'sales_user_stock') {
-                 // Attempt to create the row if it didn't exist (e.g., if a new item was allocated but no initial sale was made)
-                 const insertQuery = `
-                    INSERT INTO sales_user_stock (user_id, product_id, quantity)
-                    VALUES ($1, $2, -($3)) 
-                    ON CONFLICT (user_id, product_id) DO UPDATE 
-                    SET quantity = EXCLUDED.quantity 
-                    RETURNING *;
-                `; // This is complex, better to enforce initial stock on issue. Re-try update only.
-                // Given the pre-check, an update failure means a serious data issue.
                 throw new Error(`Critical update error for Product ID ${productId} in ${stockTable}.`);
             }
         }
-        
-        // --- STEP 6: Log Free Stock (NEW LOGIC) ---
+
+        // --- STEP 7: Log Free Stock (if any) ---
         if (freeStock && freeStock.quantities) {
             const { quantities, reason } = freeStock;
             const logQuery = `
@@ -229,9 +233,10 @@ router.post('/process', async (req, res) => {
                 }
             }
         }
-        
+
         await client.query('COMMIT');
         res.status(201).json({ message: 'Sale processed successfully', saleId });
+
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('Sale Processing Error:', error.message);
@@ -240,6 +245,7 @@ router.post('/process', async (req, res) => {
         client.release();
     }
 });
+
 
 // GET /api/sales - Get all sales transactions with filters
 router.get('/', async (req, res) => {
