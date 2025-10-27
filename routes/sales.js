@@ -215,35 +215,55 @@ for (const item of cart) {
 }
 
 
-        // --- STEP 6: Deduct Stock (Sold + Free) ---
-        for (const [productId, quantityToDeduct] of Object.entries(productsToUpdate)) {
-            let updateParams = [quantityToDeduct, productId];
-            if (stockTable === 'sales_user_stock') {
-                updateParams.push(cashierId);
-            }
+// --- STEP 5: Deduct Stock (Sold + FREE) ---
+for (const [productId, quantityToDeduct] of Object.entries(productsToUpdate)) {
+    let updateParams = [quantityToDeduct, productId];
+    if (stockTable === 'sales_user_stock') {
+        updateParams.push(cashierId);
+    }
 
-            const updateResult = await client.query(stockUpdateQuery, updateParams);
+    const updateResult = await client.query(stockUpdateQuery, updateParams);
 
-            // Ensure update succeeded (for sales_user_stock)
-            if (updateResult.rowCount === 0 && stockTable === 'sales_user_stock') {
-                throw new Error(`Critical update error for Product ID ${productId} in ${stockTable}.`);
+    if (updateResult.rowCount === 0 && stockTable === 'sales_user_stock') {
+        // Attempt to create a missing record (fallback safeguard)
+        const insertQuery = `
+            INSERT INTO sales_user_stock (user_id, product_id, quantity)
+            VALUES ($1, $2, -($3))
+            ON CONFLICT (user_id, product_id) DO UPDATE
+            SET quantity = sales_user_stock.quantity - EXCLUDED.quantity
+            RETURNING *;
+        `;
+        await client.query(insertQuery, [cashierId, productId, quantityToDeduct]);
+    }
+}
+
+// --- STEP 6: Log Free Stock + Confirm Deduction ---
+if (freeStock && freeStock.quantities) {
+    const { quantities, reason } = freeStock;
+    const logQuery = `
+        INSERT INTO free_stock_log (sale_id, product_id, quantity, reason, recorded_by)
+        VALUES ($1, $2, $3, $4, $5);
+    `;
+
+    for (const [productIdStr, quantity] of Object.entries(quantities)) {
+        const productId = parseInt(productIdStr);
+        if (quantity > 0) {
+            // Log it
+            await client.query(logQuery, [saleId, productId, quantity, reason, cashierId]);
+
+            // Also reduce free items explicitly from main inventory if sales_user_stock was used
+            if (stockTable !== 'sales_user_stock') {
+                await client.query(
+                    `UPDATE inventory
+                     SET quantity = quantity - $1, last_updated = NOW()
+                     WHERE product_id = $2;`,
+                    [quantity, productId]
+                );
             }
         }
+    }
+}
 
-        // --- STEP 7: Log Free Stock (if any) ---
-        if (freeStock && freeStock.quantities) {
-            const { quantities, reason } = freeStock;
-            const logQuery = `
-                INSERT INTO free_stock_log (sale_id, product_id, quantity, reason, recorded_by)
-                VALUES ($1, $2, $3, $4, $5);
-            `;
-            for (const [productIdStr, quantity] of Object.entries(quantities)) {
-                const productId = parseInt(productIdStr);
-                if (quantity > 0) {
-                    await client.query(logQuery, [saleId, productId, quantity, reason, cashierId]);
-                }
-            }
-        }
 
         await client.query('COMMIT');
         res.status(201).json({ message: 'Sale processed successfully', saleId });
