@@ -195,7 +195,7 @@ router.post('/process', async (req, res) => {
 
         // --- STEP 5: Record Sale Items ---
         const itemsInsertQuery = `
-            INSERT INTO sales_items (sale_id, product_id, quantity, unit_price, discount_applied)
+            INSERT INTO sales_items (sale_id, product_id, quantity, price_at_sale, discount_applied)
             VALUES ($1, $2, $3, $4, $5);
         `;
         for (const item of cart) {
