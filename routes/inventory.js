@@ -77,9 +77,12 @@ router.get('/detailed', async (req, res) => {
 
 // NEW: POST /api/inventory/manage-user-stock - Issue or return stock from a sales user
 router.post('/manage-user-stock', async (req, res) => {
-    const { adminId, userId, type, products } = req.body; // type: 'issue' or 'return', products: {productId: quantity, ...}
+    const { adminId, userId, type, products } = req.body; // type: 'issue' or 'return'
+    
+    // ✅ FIX 1: Convert type to uppercase for the ENUM
+    const issueType = type.toUpperCase(); // Becomes 'ISSUE' or 'RETURN'
 
-    if (!['issue', 'return'].includes(type)) {
+    if (!['ISSUE', 'RETURN'].includes(issueType)) { // Check against uppercase value
         return res.status(400).json({ error: 'Invalid operation type.' });
     }
 
@@ -92,15 +95,14 @@ router.post('/manage-user-stock', async (req, res) => {
             const quantity = parseInt(products[productIdStr]);
             if (quantity <= 0) continue;
 
-            // 1. Update Main Inventory
-            const invAdjustment = type === 'issue' ? -quantity : quantity;
+            // ... (Sections 1 and 2 are correct and remain unchanged) ...
+            const invAdjustment = issueType === 'ISSUE' ? -quantity : quantity;
             await client.query(
                 `UPDATE inventory SET quantity = quantity + $1, last_updated = NOW() WHERE product_id = $2`,
                 [invAdjustment, productId]
             );
 
-            // 2. Update Sales User Stock (Insert or Update)
-            const userStockAdjustment = type === 'issue' ? quantity : -quantity;
+            const userStockAdjustment = issueType === 'ISSUE' ? quantity : -quantity;
             await client.query(
                 `INSERT INTO sales_user_stock (user_id, product_id, quantity, last_updated)
                  VALUES ($1, $2, $3, NOW())
@@ -109,30 +111,28 @@ router.post('/manage-user-stock', async (req, res) => {
                 [userId, productId, userStockAdjustment]
             );
             
-            // 3. Log the Transaction (Optional but highly recommended for audit)
-// In purple-premium-bread-api/routes/inventory.js, inside POST /api/inventory/manage-user-stock
+            // 3. Log the Transaction - FIX APPLIED
+            const isIssue = issueType === 'ISSUE';
 
-// 3. Log the Transaction (Optional but highly recommended for audit)
-// Fix the column names in the INSERT query to match the corrected schema
-await client.query(
-    `INSERT INTO stock_issue_log (
-        product_id, 
-        issue_type,
-        from_user_id, 
-        to_user_id, 
-        quantity_changed, 
-        recorded_by
-    )
-     VALUES ($1, $2, $3, $4, $5, $6)`, // Updated number of parameters
-    [
-        productId, 
-        type, // This is the issue_type_enum value (e.g., 'ISSUE', 'RETURN')
-        (type === 'ISSUE' ? adminId : userId), // Example: If ISSUING, from admin to user.
-        (type === 'ISSUE' ? userId : adminId), // Example: If RETURNING, from user to admin.
-        quantity, 
-        adminId // The manager/admin who recorded the action
-    ]
-);
+            await client.query(
+                `INSERT INTO stock_issue_log (
+                    product_id, 
+                    issue_type,
+                    from_user_id, 
+                    to_user_id, 
+                    quantity_changed, 
+                    recorded_by
+                )
+                 VALUES ($1, $2, $3, $4, $5, $6)`, 
+                [
+                    productId, 
+                    issueType, // ✅ FIX 2: Use the UPPERCASE value
+                    isIssue ? adminId : userId, 
+                    isIssue ? userId : adminId, 
+                    quantity, 
+                    adminId 
+                ]
+            );
         }
 
         await client.query('COMMIT');
