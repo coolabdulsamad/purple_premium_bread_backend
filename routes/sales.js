@@ -193,12 +193,11 @@ router.post('/process', async (req, res) => {
         ]);
         const saleId = saleResult.rows[0].id;
 
-// --- STEP 4: Record Sale Items ---
-const itemsInsertQuery = `
-    INSERT INTO sales_items (sale_id, product_id, quantity, unit_price, discount_applied)
-    VALUES ($1, $2, $3, $4, $5);
-`;
-
+        // --- STEP 5: Record Sale Items ---
+        const itemsInsertQuery = `
+            INSERT INTO sales_items (sale_id, product_id, quantity, price_at_sale, discount_applied)
+            VALUES ($1, $2, $3, $4, $5);
+        `;
 // Get discount percentage from the frontend payload if available
 let discountPercent = 0;
 if (discountAmount && subtotal > 0) {
