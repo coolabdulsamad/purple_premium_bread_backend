@@ -27,6 +27,8 @@ const dashboardRoutes = require('./routes/dashboard'); // ✨ Add this line
 const reportsRoutes = require('./routes/reports'); // ✨ Add this line
 const analysisRoutes = require('./routes/analysis'); // ✨ Add this line
 const wasteStock = require('./routes/wasteStock');
+const exchangeRoutes = require('./routes/exchange'); // ✨ Add this line
+const managerRoutes = require('./routes/manager'); // ✨ Add this line
 
 
 const app = express();
@@ -65,6 +67,8 @@ app.use('/api/dashboard', dashboardRoutes); // ✨ Add this line
 app.use('/api/reports', reportsRoutes); // ✨ Add this line
 app.use('/api/analysis', analysisRoutes); // ✨ Add this line
 app.use('/api/waste-stock', wasteStock);
+app.use('/api/exchange', exchangeRoutes); // ✨ Add this line
+app.use('/api/manager', managerRoutes); // ✨ Add this line
 
 // Simple test route
 app.get('/', (req, res) => {
