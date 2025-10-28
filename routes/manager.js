@@ -2,7 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db/db');
-const { jwtDecode } = require('jwt-decode'); 
+const { jwtDecode } = require('jwt-decode');
 const authenticate = require('../middleware/authenticate'); // ✅ import your middleware
 
 // ---
@@ -16,7 +16,8 @@ router.patch('/exchange/approve/:id', authenticate, async (req, res) => {
     // Assuming req.user contains the manager's ID and role check
     const approved_by_user_id = req.user.id;
     const requestId = req.params.id;
-    const managerRole = req.user.role; // e.g., 'ADMIN', 'MANAGER'
+    const managerRole = req.user.role?.toUpperCase(); // ✅ Normalize role case
+
 
     // 1. Authorization check
     if (managerRole !== 'ADMIN' && managerRole !== 'MANAGER') {
@@ -43,7 +44,7 @@ router.patch('/exchange/approve/:id', authenticate, async (req, res) => {
         // B. Process stock movement (return bread to the Sales User's stock)
         for (const item of itemsToReturn) {
             const { product_id, quantity } = item;
-            
+
             // i. Update sales_user_stock (increase stock)
             const updateStockQuery = `
                 INSERT INTO sales_user_stock (user_id, product_id, quantity) 
@@ -52,7 +53,7 @@ router.patch('/exchange/approve/:id', authenticate, async (req, res) => {
                 DO UPDATE SET quantity = sales_user_stock.quantity + $3, last_updated = CURRENT_TIMESTAMP;
             `;
             await client.query(updateStockQuery, [salesUserId, product_id, quantity]);
-            
+
             // ii. Log the stock movement (ISSUE_TYPE: RETURN)
             const logStockQuery = `
                 INSERT INTO stock_issue_log 
@@ -76,8 +77,8 @@ router.patch('/exchange/approve/:id', authenticate, async (req, res) => {
 
         await client.query('COMMIT');
 
-        res.status(200).json({ 
-            message: 'Exchange request successfully approved and inventory updated.', 
+        res.status(200).json({
+            message: 'Exchange request successfully approved and inventory updated.',
             request: updatedRequest.rows[0]
         });
 
@@ -98,6 +99,7 @@ router.patch('/exchange/approve/:id', authenticate, async (req, res) => {
 router.get('/exchange/pending', authenticate, async (req, res) => {
 
     const managerRole = req.user.role?.toUpperCase(); // normalize to uppercase
+    console.log("Manager Role:", managerRole);
     if (managerRole !== 'ADMIN' && managerRole !== 'MANAGER') {
         return res.status(403).json({ error: 'Unauthorized.' });
     }
