@@ -17,7 +17,7 @@ const { jwtDecode } = require('jwt-decode');
  */
 // server.js - FIX for POST /api/exchange/request
 
-router.post('/request', async (req, res) => {
+router.post('/request', authenticate, async (req, res) => {
     // Assuming req.user contains the logged-in user's ID and role
     // NOTE: If req.user is not available (e.g., middleware issue), this will also cause a 500
     const requested_by_user_id = req.user.id; 
