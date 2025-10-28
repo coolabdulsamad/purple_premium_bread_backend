@@ -95,7 +95,7 @@ router.patch('/exchange/approve/:id', authenticate, async (req, res) => {
 /**
  * Route 3 (Optional but necessary): Get all pending requests for the manager dashboard
  */
-router.get('/exchange/pending', async (req, res) => {
+router.get('/exchange/pending', authenticate, async (req, res) => {
     const managerRole = req.user.role; 
     if (managerRole !== 'ADMIN' && managerRole !== 'MANAGER') {
         return res.status(403).json({ error: 'Unauthorized.' });
