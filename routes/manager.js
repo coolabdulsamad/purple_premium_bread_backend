@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db/db');
 const { jwtDecode } = require('jwt-decode'); 
+const authenticate = require('../middleware/authenticate'); // ✅ import your middleware
 
 // ---
 
@@ -11,7 +12,7 @@ const { jwtDecode } = require('jwt-decode');
  * Status: APPROVED -> RECORDED (if stock movement is successful)
  * NOTE: This is a critical route that handles inventory and finance updates.
  */
-router.patch('/exchange/approve/:id', async (req, res) => {
+router.patch('/exchange/approve/:id', authenticate, async (req, res) => {
     // Assuming req.user contains the manager's ID and role check
     const approved_by_user_id = req.user.id;
     const requestId = req.params.id;
