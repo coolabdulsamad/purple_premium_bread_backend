@@ -25,7 +25,7 @@ router.patch('/exchange/approve/:id', authenticate, async (req, res) => {
     }
 
     // Use a transaction for atomic updates to prevent data inconsistencies
-    const client = await db.connect();
+    const client = await db.pool.connect();
     try {
         await client.query('BEGIN');
 
