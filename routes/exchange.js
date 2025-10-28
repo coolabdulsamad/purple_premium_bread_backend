@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db/db');
 const { jwtDecode } = require('jwt-decode'); 
-
+const authenticate = require('../middleware/authenticate'); // Adjust the path as needed
 
 // server.js - Add new routes below existing sales/inventory routes
 
