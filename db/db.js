@@ -1,6 +1,3 @@
-// 
-
-
 const { Pool } = require('pg');
 
 const pool = new Pool({
@@ -14,15 +11,26 @@ const pool = new Pool({
   },
 });
 
+// Test connection on startup
 pool.query('SELECT NOW()', (err, res) => {
   if (err) {
     console.error('Error connecting to the database', err.stack);
   } else {
-    console.log('Database connection successful!');
+    console.log('✅ Database connection successful!');
   }
 });
 
 module.exports = {
   query: (text, params) => pool.query(text, params),
-  pool, // We'll use this for transactions
+  pool,
+  // ✅ Add this helper for transactions (used in /confirm route)
+  getClient: async () => {
+    try {
+      const client = await pool.connect();
+      return client;
+    } catch (error) {
+      console.error('❌ Error getting DB client:', error);
+      throw error;
+    }
+  },
 };
