@@ -60,4 +60,95 @@ router.post('/request', authenticate, async (req, res) => {
     }
 });
 
+
+// server.js - Add these two new routes
+
+// ==========================================================
+// SALES USER CONFIRMATION ROUTES
+// ==========================================================
+
+/**
+ * Route 1: Sales User fetches all approved exchanges awaiting their confirmation (status = 'APPROVED').
+ */
+router.get('/approved-pending-confirmation', async (req, res) => {
+    const userId = req.user.id; // User must be authenticated
+    try {
+        const query = `
+            SELECT 
+                er.id, er.created_at, er.reason, er.items_requested_jsonb,
+                c.fullname AS customer_name,
+                u.fullname AS approved_by_user_name,
+                er.approval_date
+            FROM exchange_requests er
+            JOIN customers c ON er.customer_id = c.id
+            LEFT JOIN users u ON er.approved_by_user_id = u.id -- Manager Name
+            WHERE er.status = 'APPROVED' AND er.requested_by_user_id = $1
+            ORDER BY er.approval_date DESC;
+        `;
+        const result = await db.query(query, [userId]);
+        res.status(200).json(result.rows);
+    } catch (error) {
+        console.error('Error fetching approved exchange requests:', error);
+        res.status(500).json({ error: 'Failed to fetch approved requests.' });
+    }
+});
+
+
+/**
+ * Route 2: Sales User confirms physical receipt of the approved exchange.
+ * Status: APPROVED -> RECORDED (Final state)
+ * NOTE: The stock movement was already handled by the manager. This is purely a status update.
+ */
+router.patch('/confirm/:id', async (req, res) => {
+    const userId = req.user.id; // User confirming the exchange
+    const requestId = req.params.id;
+
+    const client = await db.pool.connect();
+
+    try {
+        await client.query('BEGIN');
+
+        // 1. Validate request status and user authorization
+        const requestQuery = await client.query(
+            'SELECT * FROM exchange_requests WHERE id = $1 AND requested_by_user_id = $2 FOR UPDATE',
+            [requestId, userId]
+        );
+        const request = requestQuery.rows[0];
+
+        if (!request) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Exchange request not found or you are not authorized to confirm it.' });
+        }
+        
+        if (request.status !== 'APPROVED') {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: `Cannot confirm exchange. Status is currently: ${request.status}. Only 'APPROVED' requests can be recorded.` });
+        }
+
+        // 2. Update the Request status to RECORDED
+        const updateRequestQuery = `
+            UPDATE exchange_requests 
+            SET status = 'RECORDED', 
+                updated_at = CURRENT_TIMESTAMP 
+            WHERE id = $1
+            RETURNING *;
+        `;
+        const updatedRequest = await client.query(updateRequestQuery, [requestId]);
+
+        await client.query('COMMIT');
+
+        res.status(200).json({ 
+            message: 'Exchange successfully confirmed and recorded by sales user.', 
+            request: updatedRequest.rows[0]
+        });
+
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('Error during exchange confirmation transaction:', error);
+        res.status(500).json({ error: 'Confirmation failed due to a server error.' });
+    } finally {
+        client.release();
+    }
+});
+
 module.exports = router;
