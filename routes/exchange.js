@@ -61,16 +61,10 @@ router.post('/request', authenticate, async (req, res) => {
 });
 
 
-// server.js - Add these two new routes
-
-// ==========================================================
-// SALES USER CONFIRMATION ROUTES
-// ==========================================================
-
 /**
  * Route 1: Sales User fetches all approved exchanges awaiting their confirmation (status = 'APPROVED').
  */
-router.get('/approved-pending-confirmation', async (req, res) => {
+router.get('/approved-pending-confirmation', authenticate, async (req, res) => {
     const userId = req.user.id; // User must be authenticated
     try {
         const query = `
@@ -99,7 +93,7 @@ router.get('/approved-pending-confirmation', async (req, res) => {
  * Status: APPROVED -> RECORDED (Final state)
  * NOTE: The stock movement was already handled by the manager. This is purely a status update.
  */
-router.patch('/confirm/:id', async (req, res) => {
+router.patch('/confirm/:id', authenticate, async (req, res) => {
     const userId = req.user.id; // User confirming the exchange
     const requestId = req.params.id;
 
