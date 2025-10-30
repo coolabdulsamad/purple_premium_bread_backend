@@ -47,12 +47,11 @@ router.patch('/exchange/approve/:id', authenticate, async (req, res) => {
         const requested_by_user_id = requestData.requested_by_user_id;
 
         // B. Process the items for 'return' (re-stocking the user's account for the spoiled/returned item)
-        // This logic effectively increases the sales user's stock for that product in sales_user_stock.
         for (const item of requestData.items_requested_jsonb) {
             const { product_id, quantity } = item; 
             
             // 1. Update sales_user_stock (Increase the stock of the returned item)
-            // FIX: Changed stock_allocated to quantity
+            // ⭐ CRITICAL FIX: Changed column from stock_quantity to 'quantity'
             const updateStockQuery = `
                 INSERT INTO sales_user_stock (user_id, product_id, quantity)
                 VALUES ($1, $2, $3)
@@ -60,14 +59,13 @@ router.patch('/exchange/approve/:id', authenticate, async (req, res) => {
                 DO UPDATE SET quantity = sales_user_stock.quantity + $3
             `;
             await client.query(updateStockQuery, [requested_by_user_id, product_id, quantity]);
-
-            // ⭐ CRITICAL: REMOVE the stock_issue_log INSERTION - now fully removed.
         }
         
         // C. Update the exchange request status to APPROVED
+        // ⭐ CRITICAL FIX: Changed column from 'approved_at' to 'approval_date'
         const updateStatusQuery = `
             UPDATE exchange_requests 
-            SET status = 'APPROVED', approved_by_user_id = $2, approved_at = CURRENT_TIMESTAMP 
+            SET status = 'APPROVED', approved_by_user_id = $2, approval_date = CURRENT_TIMESTAMP 
             WHERE id = $1
         `;
         await client.query(updateStatusQuery, [requestId, approved_by_user_id]);
@@ -85,7 +83,7 @@ router.patch('/exchange/approve/:id', authenticate, async (req, res) => {
     }
 });
 
-// ---
+// --- (Route 3 remains the same as it only reads data) ---
 
 /**
  * Route 3: Get all pending requests for the manager dashboard
