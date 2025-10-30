@@ -29,7 +29,7 @@ const analysisRoutes = require('./routes/analysis'); // ✨ Add this line
 const wasteStock = require('./routes/wasteStock');
 const exchangeRoutes = require('./routes/exchange'); // ✨ Add this line
 const managerRoutes = require('./routes/manager'); // ✨ Add this line
-
+const stockIssueLogRoutes = require('./routes/stock-issue-log');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -69,6 +69,7 @@ app.use('/api/analysis', analysisRoutes); // ✨ Add this line
 app.use('/api/waste-stock', wasteStock);
 app.use('/api/exchange', exchangeRoutes); // ✨ Add this line
 app.use('/api/manager', managerRoutes); // ✨ Add this line
+app.use('/api/stock-issue-log', stockIssueLogRoutes);
 
 // Simple test route
 app.get('/', (req, res) => {
