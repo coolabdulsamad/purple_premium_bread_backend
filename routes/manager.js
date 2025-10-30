@@ -45,26 +45,23 @@ router.patch('/exchange/approve/:id', authenticate, async (req, res) => {
         }
 
         const requested_by_user_id = requestData.requested_by_user_id;
-        // const message = req.body.message || 'Approved by Manager/Admin.'; // Not currently used in the schema
 
         // B. Process the items for 'return' (re-stocking the user's account for the spoiled/returned item)
-        // The 'quantity' in the request JSONB represents the quantity of the SPOILED item being 'returned'.
         // This logic effectively increases the sales user's stock for that product in sales_user_stock.
         for (const item of requestData.items_requested_jsonb) {
             const { product_id, quantity } = item; 
             
             // 1. Update sales_user_stock (Increase the stock of the returned item)
-            // This uses ON CONFLICT to INSERT a new row if it doesn't exist, which is safer.
+            // FIX: Changed stock_allocated to quantity
             const updateStockQuery = `
-                INSERT INTO sales_user_stock (user_id, product_id, stock_allocated)
+                INSERT INTO sales_user_stock (user_id, product_id, quantity)
                 VALUES ($1, $2, $3)
                 ON CONFLICT (user_id, product_id)
-                DO UPDATE SET stock_allocated = sales_user_stock.stock_allocated + $3
+                DO UPDATE SET quantity = sales_user_stock.quantity + $3
             `;
             await client.query(updateStockQuery, [requested_by_user_id, product_id, quantity]);
 
-            // ⭐ CRITICAL: REMOVE the stock_issue_log INSERTION
-            // Per user request, the bread exchange process should not log to stock_issue_log.
+            // ⭐ CRITICAL: REMOVE the stock_issue_log INSERTION - now fully removed.
         }
         
         // C. Update the exchange request status to APPROVED
@@ -88,7 +85,7 @@ router.patch('/exchange/approve/:id', authenticate, async (req, res) => {
     }
 });
 
-// ---\
+// ---
 
 /**
  * Route 3: Get all pending requests for the manager dashboard
@@ -96,7 +93,6 @@ router.patch('/exchange/approve/:id', authenticate, async (req, res) => {
 router.get('/exchange/pending', authenticate, async (req, res) => {
 
     const managerRole = req.user.role?.toUpperCase(); // normalize to uppercase
-    console.log("Manager Role:", managerRole);
     if (managerRole !== 'ADMIN' && managerRole !== 'MANAGER') {
         return res.status(403).json({ error: 'Unauthorized.' });
     }

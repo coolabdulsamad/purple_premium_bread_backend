@@ -56,9 +56,6 @@ router.patch('/confirm/:requestId', authenticate, async (req, res) => {
     const currentUserId = req.user.id;
     const currentUserRole = req.user.role?.toUpperCase();
 
-    // Authorization check: Only the requesting user (or Admin/Manager) can confirm.
-    // We will enforce the user ID check inside the transaction after fetching the request.
-
     const client = await db.pool.connect();
     try {
         await client.query('BEGIN');
@@ -94,8 +91,9 @@ router.patch('/confirm/:requestId', authenticate, async (req, res) => {
                 // 1. DEDUCT FROM SALES_USER_STOCK (Allocated Stock)
                 
                 // ⭐ CRITICAL 1: Check if the user has enough stock first.
+                // FIX: Changed stock_allocated to quantity
                 const stockCheckQuery = `
-                    SELECT COALESCE(stock_allocated, 0) AS current_stock 
+                    SELECT COALESCE(quantity, 0) AS current_stock 
                     FROM sales_user_stock 
                     WHERE user_id = $1 AND product_id = $2
                 `;
@@ -111,11 +109,12 @@ router.patch('/confirm/:requestId', authenticate, async (req, res) => {
                 }
 
                 // Proceed with deduction from sales_user_stock
+                // FIX: Changed stock_allocated to quantity
                 const deductionQuery = `
                     UPDATE sales_user_stock 
-                    SET stock_allocated = stock_allocated - $1 
+                    SET quantity = quantity - $1 
                     WHERE user_id = $2 AND product_id = $3
-                    RETURNING stock_allocated;
+                    RETURNING quantity;
                 `;
                 await client.query(deductionQuery, [quantity, requested_by_user_id, product_id]);
 
@@ -125,15 +124,14 @@ router.patch('/confirm/:requestId', authenticate, async (req, res) => {
                 // 2. DEDUCT FROM MAIN INVENTORY (Normal Inventory)
                 const deductionQuery = `
                     UPDATE inventory 
-                    SET current_stock = current_stock - $1 
+                    SET quantity = quantity - $1 
                     WHERE product_id = $2
-                    RETURNING current_stock;
+                    RETURNING quantity;
                 `;
                 const result = await client.query(deductionQuery, [quantity, product_id]);
 
                 if (result.rowCount === 0) {
-                     // Product not found in inventory, which is an error state
-                     // NOTE: You might need a check for negative stock depending on your database constraints
+                     // Note: You might want to add stock checking for main inventory as well to prevent negative stock.
                 }
 
                 // ⭐ LOGGING REMOVED: Exchange is a replacement, not a standard loggable stock issue.
