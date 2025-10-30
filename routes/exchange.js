@@ -120,9 +120,9 @@ router.patch('/confirm/:requestId', authenticate, async (req, res) => {
                 // 2. DEDUCT FROM MAIN INVENTORY (Normal Inventory)
                 const deductionQuery = `
                     UPDATE inventory 
-                    SET current_stock = current_stock - $1 
+                    SET quantity = quantity - $1 
                     WHERE product_id = $2
-                    RETURNING current_stock;
+                    RETURNING quantity;
                 `;
                 const result = await client.query(deductionQuery, [quantity, product_id]);
 
