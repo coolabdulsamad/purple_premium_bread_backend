@@ -30,316 +30,300 @@ router.post('/request', authenticate, async (req, res) => {
     try {
         const query = `
             INSERT INTO exchange_requests 
-                (original_sale_id, customer_id, requested_by_user_id, items_requested_jsonb, reason, status) 
-            VALUES ($1, $2, $3, $4, $5, 'PENDING')
-            RETURNING *;
+                (original_sale_id, customer_id, requested_by_user_id, items_requested_jsonb, reason, status)
+            VALUES 
+                ($1, $2, $3, $4, $5, 'PENDING')
+            RETURNING id;
         `;
-        // Pass the stringified JSON here ($4)
-        const values = [
-            original_sale_id || null, 
-            customer_id, 
-            requested_by_user_id, 
-            items_json_string, 
-            reason
-        ];
-        
-        const result = await db.query(query, values);
-        
-        res.status(201).json({ 
-            message: 'Exchange request submitted successfully. Awaiting manager approval.', 
-            request: result.rows[0] 
-        });
-
+        const result = await db.query(query, [original_sale_id, customer_id, requested_by_user_id, items_json_string, reason]);
+        res.status(201).json({ message: 'Exchange request submitted successfully.', requestId: result.rows[0].id });
     } catch (error) {
-        console.error('Error submitting exchange request:', error); 
-        res.status(500).json({ error: 'Failed to submit exchange request.' });
+        console.error('Error submitting exchange request:', error);
+        res.status(500).json({ error: 'Failed to submit exchange request.', details: error.message });
     }
 });
 
+// ---
 
 /**
- * Route 2: Manager approves an exchange request.
- * Status: PENDING -> APPROVED
- */
-
-router.patch('/approve/:requestId', authenticate, async (req, res) => {
-    // Role check: Only 'admin' or 'manager' can approve
-    if (!['admin', 'manager'].includes(req.user.role)) {
-        return res.status(403).json({ error: 'Forbidden. Only managers or admins can approve exchange requests.' });
-    }
-
-    const approved_by_user_id = req.user.id;
-    const requestId = req.params.requestId;
-
-    try {
-        const query = `
-            UPDATE exchange_requests 
-            SET status = 'APPROVED', 
-                approved_by_user_id = $1, 
-                approval_date = CURRENT_TIMESTAMP,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = $2 AND status = 'PENDING'
-            RETURNING *;
-        `;
-        const result = await db.query(query, [approved_by_user_id, requestId]);
-
-        if (result.rowCount === 0) {
-            return res.status(404).json({ error: 'Exchange request not found or is not currently PENDING.' });
-        }
-        
-        res.status(200).json({ 
-            message: 'Exchange request approved successfully. Sales user can now confirm it.', 
-            request: result.rows[0] 
-        });
-
-    } catch (error) {
-        console.error('Error approving exchange request:', error); 
-        res.status(500).json({ error: 'Failed to approve exchange request.' });
-    }
-});
-
-/**
- * Route 3: Sales User confirms the exchange (after Manager Approval).
- * Status: APPROVED -> RECORDED. DEDUCTS STOCK.
- * * IMPLEMENTS THE NEW DEDUCTION LOGIC: User Stock Log (if configured) OR Normal Stock (Inventory).
+ * Route 2: Sales User confirms an APPROVED Exchange.
+ * Status: APPROVED -> RECORDED
+ * NOTE: This is the critical step where new product stock is DEDUCTED.
+ * It must check the user's load_from_demo_stock flag.
  */
 router.patch('/confirm/:requestId', authenticate, async (req, res) => {
-    // Only the user who requested the exchange should confirm it
-    const userId = req.user.id; 
     const requestId = req.params.requestId;
-    const client = await db.getClient(); // Use a client for transaction management
+    const currentUserId = req.user.id;
+    const currentUserRole = req.user.role?.toUpperCase();
 
+    // Authorization check: Only the requesting user (or Admin/Manager) can confirm.
+    // We will enforce the user ID check inside the transaction after fetching the request.
+
+    const client = await db.pool.connect();
     try {
         await client.query('BEGIN');
 
-        // 1. Fetch Request, get user's stock deduction setting, and Lock it
-        // Ensure only the original requester can confirm an approved request
-        const requestQuery = await client.query(
-            `SELECT 
-                er.items_requested_jsonb, 
-                er.status, 
-                er.requested_by_user_id,
-                u.load_from_demo_stock -- Get the flag that determines stock source
-             FROM exchange_requests er
-             JOIN users u ON er.requested_by_user_id = u.id
-             WHERE er.id = $1 AND er.requested_by_user_id = $2 FOR UPDATE`,
-            [requestId, userId]
-        );
-        const request = requestQuery.rows[0];
-
-        if (!request) {
+        // A. Fetch the request details and the requesting user's settings
+        const requestQuery = await client.query('SELECT er.*, u.load_from_demo_stock, u.fullname FROM exchange_requests er JOIN users u ON er.requested_by_user_id = u.id WHERE er.id = $1 FOR UPDATE', [requestId]);
+        
+        if (requestQuery.rowCount === 0) {
             await client.query('ROLLBACK');
-            return res.status(404).json({ error: 'Exchange request not found or you are not authorized to confirm it.' });
+            return res.status(404).json({ error: 'Exchange request not found.' });
+        }
+        
+        const request = requestQuery.rows[0];
+        
+        // Authorization Check (secondary/stricter)
+        if (request.requested_by_user_id !== currentUserId && currentUserRole !== 'ADMIN' && currentUserRole !== 'MANAGER') {
+            await client.query('ROLLBACK');
+            return res.status(403).json({ error: 'Unauthorized. You can only confirm your own requests.' });
         }
         
         if (request.status !== 'APPROVED') {
             await client.query('ROLLBACK');
-            return res.status(400).json({ error: `Cannot confirm exchange. Status is currently: ${request.status}. Only 'APPROVED' requests can be recorded.` });
+            return res.status(400).json({ error: `Cannot confirm exchange. Current status is '${request.status}'.` });
         }
 
-        const itemsToIssue = request.items_requested_jsonb;
-        // load_from_demo_stock in the users table determines if stock is deducted from the user's dedicated stock
-        const loadFromUserStock = request.load_from_demo_stock; 
+        const { items_requested_jsonb, requested_by_user_id, load_from_demo_stock, fullname } = request;
 
-        // 2. DEDUCT STOCK based on the requested logic
-        for (const item of itemsToIssue) {
-            const productId = item.product_id;
-            const quantity = item.quantity;
-
-            if (loadFromUserStock) {
-                // LOGIC: Deduct from user stock log (`sales_user_stock`)
-                
-                // A. Check current user stock (and lock row)
-                const userStockCheck = await client.query(
-                    `SELECT quantity FROM sales_user_stock WHERE user_id = $1 AND product_id = $2 FOR UPDATE`,
-                    [userId, productId]
-                );
-                const currentQuantity = userStockCheck.rows[0]?.quantity || 0;
-
-                if (currentQuantity < quantity) {
-                    await client.query('ROLLBACK');
-                    return res.status(400).json({ 
-                        error: `Insufficient stock for product ID ${productId}. User stock is ${currentQuantity}, but ${quantity} is required. Please ask your manager to issue more stock or uncheck the 'load from personal stock' setting.` 
-                    });
-                }
-                
-                // B. Deduct from sales_user_stock
-                await client.query(
-                    `UPDATE sales_user_stock
-                     SET quantity = quantity - $1, last_updated = CURRENT_TIMESTAMP
-                     WHERE user_id = $2 AND product_id = $3`,
-                    [quantity, userId, productId]
-                );
-                
-                // C. Log the stock issue from the user's stock
-                await client.query(
-                    `INSERT INTO stock_issue_log (issue_type, from_user_id, to_user_id, product_id, quantity_changed, note, recorded_by)
-                     VALUES ('ISSUE', $1, NULL, $2, $3, $4, $5)`,
-                    [userId, productId, quantity, `Exchange request ${requestId} confirmed. Item issued from user stock.`, userId]
-                );
-
-            } else {
-                // LOGIC: Deduct from normal stock (`inventory`)
-                
-                // A. Check current inventory stock (and lock row)
-                const inventoryCheck = await client.query(
-                    `SELECT quantity FROM inventory WHERE product_id = $1 FOR UPDATE`,
-                    [productId]
-                );
-                const currentQuantity = inventoryCheck.rows[0]?.quantity || 0;
-                
-                if (currentQuantity < quantity) {
-                    await client.query('ROLLBACK');
-                    return res.status(400).json({ 
-                        error: `Insufficient stock for product ID ${productId}. Main inventory stock is ${currentQuantity}, but ${quantity} is required.` 
-                    });
-                }
-
-                // B. Deduct from inventory
-                await client.query(
-                    `UPDATE inventory
-                     SET quantity = quantity - $1, last_updated = CURRENT_TIMESTAMP
-                     WHERE product_id = $2`,
-                    [quantity, productId]
-                );
-                
-                // C. Log the stock issue from main inventory
-                await client.query(
-                    `INSERT INTO stock_issue_log (issue_type, from_user_id, to_user_id, product_id, quantity_changed, note, recorded_by)
-                     VALUES ('ISSUE', NULL, NULL, $1, $2, $3, $4)`,
-                    [productId, quantity, `Exchange request ${requestId} confirmed. Item issued from main inventory.`, userId]
-                );
-            }
+        // B. Loop through items and perform stock deduction based on user setting
+        for (const item of items_requested_jsonb) {
+            const { product_id, quantity } = item;
             
-            // NOTE: A full exchange would also need logic to INCREASE stock (return) of the old item.
-            // This code only covers the DEDUCTION (ISSUE) of the new item requested in the exchange.
+            if (load_from_demo_stock) {
+                // 1. DEDUCT FROM SALES_USER_STOCK (Allocated Stock)
+                
+                // ⭐ CRITICAL 1: Check if the user has enough stock first.
+                const stockCheckQuery = `
+                    SELECT COALESCE(stock_allocated, 0) AS current_stock 
+                    FROM sales_user_stock 
+                    WHERE user_id = $1 AND product_id = $2
+                `;
+                const stockCheckResult = await client.query(stockCheckQuery, [requested_by_user_id, product_id]);
+                const currentStock = stockCheckResult.rows.length > 0 ? stockCheckResult.rows[0].current_stock : 0;
+
+                if (currentStock < quantity) {
+                    // ⭐ CRITICAL 1: Fail the transaction and rollback if not enough stock.
+                    await client.query('ROLLBACK');
+                    return res.status(400).json({ 
+                        error: `Exchange failed: Sales User ${fullname} (ID: ${requested_by_user_id}) does not have enough allocated stock (${currentStock}) for Product ID ${product_id}.` 
+                    });
+                }
+
+                // Proceed with deduction from sales_user_stock
+                const deductionQuery = `
+                    UPDATE sales_user_stock 
+                    SET stock_allocated = stock_allocated - $1 
+                    WHERE user_id = $2 AND product_id = $3
+                    RETURNING stock_allocated;
+                `;
+                await client.query(deductionQuery, [quantity, requested_by_user_id, product_id]);
+
+                // ⭐ LOGGING REMOVED: Exchange is a replacement, not a standard loggable stock issue.
+                
+            } else {
+                // 2. DEDUCT FROM MAIN INVENTORY (Normal Inventory)
+                const deductionQuery = `
+                    UPDATE inventory 
+                    SET current_stock = current_stock - $1 
+                    WHERE product_id = $2
+                    RETURNING current_stock;
+                `;
+                const result = await client.query(deductionQuery, [quantity, product_id]);
+
+                if (result.rowCount === 0) {
+                     // Product not found in inventory, which is an error state
+                     // NOTE: You might need a check for negative stock depending on your database constraints
+                }
+
+                // ⭐ LOGGING REMOVED: Exchange is a replacement, not a standard loggable stock issue.
+            }
         }
 
-
-        // 3. Update the Request status to RECORDED
-        const updateRequestQuery = `
+        // C. Update the exchange request status to RECORDED
+        const updateStatusQuery = `
             UPDATE exchange_requests 
-            SET status = 'RECORDED', 
-                updated_at = CURRENT_TIMESTAMP 
+            SET status = 'RECORDED', confirmed_at = CURRENT_TIMESTAMP 
             WHERE id = $1
-            RETURNING *;
         `;
-        const updatedRequest = await client.query(updateRequestQuery, [requestId]);
-
+        await client.query(updateStatusQuery, [requestId]);
+        
+        // D. Commit the transaction
         await client.query('COMMIT');
-
-        res.status(200).json({ 
-            message: 'Exchange successfully confirmed and recorded by sales user. Stock deducted.', 
-            request: updatedRequest.rows[0]
-        });
+        res.status(200).json({ message: 'Exchange successfully confirmed and stock deducted.' });
 
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('Error during exchange confirmation transaction:', error);
-        res.status(500).json({ error: 'Confirmation failed due to a server error.' });
+        res.status(500).json({ error: 'Confirmation failed due to a server error.', details: error.message });
     } finally {
         client.release();
     }
 });
 
+
+// ---
+
 /**
- * Route 4: Sales User fetches all approved exchanges awaiting their confirmation (status = 'APPROVED').
+ * Route 3: Get all APPROVED requests pending confirmation by the sales user.
  */
 router.get('/approved-pending-confirmation', authenticate, async (req, res) => {
-    const userId = req.user.id; // User must be authenticated
-    try {
-        const query = `
-            SELECT er.id, er.created_at, er.reason, er.items_requested_jsonb, c.fullname AS customer_name, u.fullname AS approved_by_user_name, er.approval_date 
-            FROM exchange_requests er 
-            JOIN customers c ON er.customer_id = c.id 
-            LEFT JOIN users u ON er.approved_by_user_id = u.id -- Manager Name
-            WHERE er.status = 'APPROVED' AND er.requested_by_user_id = $1 
-            ORDER BY er.approval_date DESC;
+    // Only sales role needs to see their own approved exchanges
+    const requested_by_user_id = req.user.id;
+    const userRole = req.user.role?.toUpperCase();
+
+    let query;
+    let params = [];
+
+    // Admins/Managers can see all pending-confirmation requests
+    if (userRole === 'ADMIN' || userRole === 'MANAGER') {
+        query = `
+            SELECT 
+                er.id, er.created_at, er.reason, er.items_requested_jsonb, er.status,
+                c.fullname AS customer_name,
+                u.fullname AS requested_by_user_name
+            FROM exchange_requests er
+            JOIN customers c ON er.customer_id = c.id
+            JOIN users u ON er.requested_by_user_id = u.id
+            WHERE er.status = 'APPROVED'
+            ORDER BY er.created_at DESC;
         `;
-        const result = await db.query(query, [userId]);
+    } else if (userRole === 'SALES') {
+        // Sales user can only see their own
+        query = `
+            SELECT 
+                er.id, er.created_at, er.reason, er.items_requested_jsonb, er.status,
+                c.fullname AS customer_name,
+                u.fullname AS requested_by_user_name
+            FROM exchange_requests er
+            JOIN customers c ON er.customer_id = c.id
+            JOIN users u ON er.requested_by_user_id = u.id
+            WHERE er.status = 'APPROVED' AND er.requested_by_user_id = $1
+            ORDER BY er.created_at DESC;
+        `;
+        params.push(requested_by_user_id);
+    } else {
+        return res.status(403).json({ error: 'Unauthorized role to view this queue.' });
+    }
+
+    try {
+        const result = await db.query(query, params);
         res.status(200).json(result.rows);
     } catch (error) {
-        console.error('Error fetching approved requests for confirmation:', error);
-        res.status(500).json({ error: 'Failed to fetch requests.' });
+        console.error('Error fetching approved/pending confirmation requests:', error);
+        res.status(500).json({ error: 'Failed to fetch requests.', details: error.message });
     }
 });
 
+// ---
 
 /**
- * Route 5: Manager/Admin fetches all PENDING exchange requests.
+ * Route 4: Get all PENDING requests. (Primarily for a sales user to track their request)
  */
 router.get('/pending', authenticate, async (req, res) => {
-    if (!['admin', 'manager'].includes(req.user.role)) {
-        return res.status(403).json({ error: 'Forbidden. Only managers or admins can view pending exchange requests.' });
+    const requested_by_user_id = req.user.id;
+    const userRole = req.user.role?.toUpperCase();
+
+    let query;
+    let params = [];
+    
+    // Admins/Managers can see all PENDING requests (They have a separate manager route for their queue, but this covers general views)
+    if (userRole === 'ADMIN' || userRole === 'MANAGER') {
+        query = `
+            SELECT 
+                er.id, er.created_at, er.reason, er.items_requested_jsonb, er.status,
+                c.fullname AS customer_name,
+                u.fullname AS requested_by_user_name
+            FROM exchange_requests er
+            JOIN customers c ON er.customer_id = c.id
+            JOIN users u ON er.requested_by_user_id = u.id
+            WHERE er.status = 'PENDING'
+            ORDER BY er.created_at DESC;
+        `;
+    } else if (userRole === 'SALES') {
+        // Sales user can only see their own
+        query = `
+            SELECT 
+                er.id, er.created_at, er.reason, er.items_requested_jsonb, er.status,
+                c.fullname AS customer_name,
+                u.fullname AS requested_by_user_name
+            FROM exchange_requests er
+            JOIN customers c ON er.customer_id = c.id
+            JOIN users u ON er.requested_by_user_id = u.id
+            WHERE er.status = 'PENDING' AND er.requested_by_user_id = $1
+            ORDER BY er.created_at DESC;
+        `;
+        params.push(requested_by_user_id);
+    } else {
+        return res.status(403).json({ error: 'Unauthorized role to view this queue.' });
     }
 
     try {
-        const query = `
-            SELECT er.id, er.created_at, er.reason, er.items_requested_jsonb, c.fullname AS customer_name, u.fullname AS requested_by_user_name, er.original_sale_id
-            FROM exchange_requests er
-            JOIN customers c ON er.customer_id = c.id
-            LEFT JOIN users u ON er.requested_by_user_id = u.id -- Requester Name
-            WHERE er.status = 'PENDING'
-            ORDER BY er.created_at ASC;
-        `;
-        const result = await db.query(query);
+        const result = await db.query(query, params);
         res.status(200).json(result.rows);
     } catch (error) {
         console.error('Error fetching pending exchange requests:', error);
-        res.status(500).json({ error: 'Failed to fetch pending requests.' });
+        res.status(500).json({ error: 'Failed to fetch requests.', details: error.message });
     }
 });
 
-// ==========================================================
-// ✨ NEW: Route 6 - General Exchange History (Role-Based)
-// ==========================================================
+// ---
+
+/**
+ * Route 5: Get Exchange History (Completed/Recorded exchanges)
+ */
 router.get('/history', authenticate, async (req, res) => {
-    const userId = req.user.id;
-    const userRole = req.user.role;
+    const currentUserId = req.user.id;
+    const userRole = req.user.role?.toUpperCase();
+
     let query;
-    let values = [];
+    let params = [];
 
-    // Base Query to fetch exchange requests
-    const baseQuery = `
-        SELECT 
-            er.id, 
-            er.created_at, 
-            er.reason, 
-            er.status, 
-            er.original_sale_id,
-            er.items_requested_jsonb, 
-            c.fullname AS customer_name,
-            u_req.fullname AS requested_by_user_name,
-            u_app.fullname AS approved_by_user_name
-        FROM exchange_requests er
-        JOIN customers c ON er.customer_id = c.id
-        LEFT JOIN users u_req ON er.requested_by_user_id = u_req.id -- Requester
-        LEFT JOIN users u_app ON er.approved_by_user_id = u_app.id -- Approver
-    `;
-
-    if (['admin', 'manager'].includes(userRole)) {
-        // Admins/Managers see all requests
-        query = `${baseQuery} ORDER BY er.created_at DESC;`;
+    // Admins/Managers see all history
+    if (userRole === 'ADMIN' || userRole === 'MANAGER') {
+        query = `
+            SELECT 
+                er.id, er.created_at, er.confirmed_at, er.reason, er.items_requested_jsonb, er.status,
+                c.fullname AS customer_name,
+                u.fullname AS requested_by_user_name,
+                ua.fullname AS approved_by_user_name
+            FROM exchange_requests er
+            JOIN customers c ON er.customer_id = c.id
+            JOIN users u ON er.requested_by_user_id = u.id
+            LEFT JOIN users ua ON er.approved_by_user_id = ua.id
+            WHERE er.status = 'RECORDED'
+            ORDER BY er.confirmed_at DESC;
+        `;
+    } else if (userRole === 'SALES') {
+        // Sales user sees only their own history
+        query = `
+            SELECT 
+                er.id, er.created_at, er.confirmed_at, er.reason, er.items_requested_jsonb, er.status,
+                c.fullname AS customer_name,
+                u.fullname AS requested_by_user_name,
+                ua.fullname AS approved_by_user_name
+            FROM exchange_requests er
+            JOIN customers c ON er.customer_id = c.id
+            JOIN users u ON er.requested_by_user_id = u.id
+            LEFT JOIN users ua ON er.approved_by_user_id = ua.id
+            WHERE er.status = 'RECORDED' AND er.requested_by_user_id = $1
+            ORDER BY er.confirmed_at DESC;
+        `;
+        params.push(currentUserId);
     } else {
-        // Sales users see only their own requests
-        query = `${baseQuery} WHERE er.requested_by_user_id = $1 ORDER BY er.created_at DESC;`;
-        values.push(userId);
+        return res.status(403).json({ error: 'Unauthorized role to view history.' });
     }
-
+    
     try {
-        const result = await db.query(query, values);
-        let requests = result.rows;
-
-        // 1. Collect all unique product IDs from all requests
+        const result = await db.query(query, params);
+        const requests = result.rows;
+        
+        // 1. Collect all unique product IDs
         const productIds = new Set();
         requests.forEach(req => {
-            // Ensure items_requested_jsonb is an array before trying to iterate
             if (Array.isArray(req.items_requested_jsonb)) {
                 req.items_requested_jsonb.forEach(item => {
-                    // Check if product_id is valid before adding to the set
-                    if (item.product_id) {
-                        productIds.add(item.product_id);
-                    }
+                    productIds.add(item.product_id);
                 });
             }
         });
@@ -378,8 +362,12 @@ router.get('/history', authenticate, async (req, res) => {
 
     } catch (error) {
         console.error('Error fetching exchange history:', error);
-        res.status(500).json({ error: 'Failed to fetch exchange history.' });
+        res.status(500).json({ error: 'Failed to fetch exchange history.', details: error.message });
     }
 });
+
+
+// Note: The /approve route is intentionally omitted here to prevent accidental use
+// and to centralize the approval logic in manager.js.
 
 module.exports = router;

@@ -9,8 +9,9 @@ const authenticate = require('../middleware/authenticate'); // ✅ import your m
 
 /**
  * Route 2: Manager/Admin approves an Exchange Request.
- * Status: APPROVED -> RECORDED (if stock movement is successful)
- * NOTE: This is a critical route that handles inventory and finance updates.
+ * Status: PENDING -> APPROVED
+ * NOTE: This is a critical route that handles the RETURN of the spoiled item
+ * by INCREASING the sales user's stock.
  */
 router.patch('/exchange/approve/:id', authenticate, async (req, res) => {
     // Assuming req.user contains the manager's ID and role check
@@ -29,72 +30,68 @@ router.patch('/exchange/approve/:id', authenticate, async (req, res) => {
     try {
         await client.query('BEGIN');
 
-        // A. Retrieve and lock the request
+        // A. Retrieve and lock the request, and check its status
         const requestQuery = await client.query('SELECT * FROM exchange_requests WHERE id = $1 FOR UPDATE', [requestId]);
-        const request = requestQuery.rows[0];
+        const requestData = requestQuery.rows[0];
 
-        if (!request || request.status !== 'PENDING') {
+        if (!requestData) {
             await client.query('ROLLBACK');
-            return res.status(404).json({ error: 'Exchange request not found or already processed.' });
+            return res.status(404).json({ error: 'Exchange request not found.' });
         }
 
-        const itemsToReturn = request.items_requested_jsonb;
-        const salesUserId = request.requested_by_user_id;
+        if (requestData.status !== 'PENDING') {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: `Request status is '${requestData.status}'. Only PENDING requests can be approved.` });
+        }
 
-        // B. Process stock movement (return bread to the Sales User's stock)
-        for (const item of itemsToReturn) {
-            const { product_id, quantity } = item;
+        const requested_by_user_id = requestData.requested_by_user_id;
+        // const message = req.body.message || 'Approved by Manager/Admin.'; // Not currently used in the schema
 
-            // i. Update sales_user_stock (increase stock)
+        // B. Process the items for 'return' (re-stocking the user's account for the spoiled/returned item)
+        // The 'quantity' in the request JSONB represents the quantity of the SPOILED item being 'returned'.
+        // This logic effectively increases the sales user's stock for that product in sales_user_stock.
+        for (const item of requestData.items_requested_jsonb) {
+            const { product_id, quantity } = item; 
+            
+            // 1. Update sales_user_stock (Increase the stock of the returned item)
+            // This uses ON CONFLICT to INSERT a new row if it doesn't exist, which is safer.
             const updateStockQuery = `
-                INSERT INTO sales_user_stock (user_id, product_id, quantity) 
+                INSERT INTO sales_user_stock (user_id, product_id, stock_allocated)
                 VALUES ($1, $2, $3)
-                ON CONFLICT (user_id, product_id) 
-                DO UPDATE SET quantity = sales_user_stock.quantity + $3, last_updated = CURRENT_TIMESTAMP;
+                ON CONFLICT (user_id, product_id)
+                DO UPDATE SET stock_allocated = sales_user_stock.stock_allocated + $3
             `;
-            await client.query(updateStockQuery, [salesUserId, product_id, quantity]);
+            await client.query(updateStockQuery, [requested_by_user_id, product_id, quantity]);
 
-            // ii. Log the stock movement (ISSUE_TYPE: RETURN)
-            const logStockQuery = `
-                INSERT INTO stock_issue_log 
-                    (issue_type, to_user_id, product_id, quantity_changed, note, recorded_by)
-                VALUES ('RETURN', $1, $2, $3, $4, $5);
-            `;
-            const logNote = `Customer exchange approved. Returned to stock by Manager approval for Request ID ${requestId}.`;
-            await client.query(logStockQuery, [salesUserId, product_id, quantity, logNote, approved_by_user_id]);
+            // ⭐ CRITICAL: REMOVE the stock_issue_log INSERTION
+            // Per user request, the bread exchange process should not log to stock_issue_log.
         }
-
-        // C. Update the Request status
-        const updateRequestQuery = `
+        
+        // C. Update the exchange request status to APPROVED
+        const updateStatusQuery = `
             UPDATE exchange_requests 
-            SET status = 'APPROVED', 
-                approved_by_user_id = $1, 
-                approval_date = CURRENT_TIMESTAMP 
-            WHERE id = $2
-            RETURNING *;
+            SET status = 'APPROVED', approved_by_user_id = $2, approved_at = CURRENT_TIMESTAMP 
+            WHERE id = $1
         `;
-        const updatedRequest = await client.query(updateRequestQuery, [approved_by_user_id, requestId]);
-
+        await client.query(updateStatusQuery, [requestId, approved_by_user_id]);
+        
+        // D. Commit the transaction
         await client.query('COMMIT');
-
-        res.status(200).json({
-            message: 'Exchange request successfully approved and inventory updated.',
-            request: updatedRequest.rows[0]
-        });
+        res.status(200).json({ message: 'Exchange successfully approved and sales user stock re-credited (return recorded).', requestId: requestId });
 
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('Error during exchange approval transaction:', error);
-        res.status(500).json({ error: 'Approval failed due to a server error.' });
+        res.status(500).json({ error: 'Approval failed due to a server error.', details: error.message });
     } finally {
         client.release();
     }
 });
 
-// ---
+// ---\
 
 /**
- * Route 3 (Optional but necessary): Get all pending requests for the manager dashboard
+ * Route 3: Get all pending requests for the manager dashboard
  */
 router.get('/exchange/pending', authenticate, async (req, res) => {
 
@@ -109,7 +106,8 @@ router.get('/exchange/pending', authenticate, async (req, res) => {
             SELECT 
                 er.id, er.created_at, er.reason, er.items_requested_jsonb,
                 c.fullname AS customer_name,
-                u.fullname AS requested_by_user_name
+                u.fullname AS requested_by_user_name,
+                u.load_from_demo_stock
             FROM exchange_requests er
             JOIN customers c ON er.customer_id = c.id
             JOIN users u ON er.requested_by_user_id = u.id
@@ -119,8 +117,8 @@ router.get('/exchange/pending', authenticate, async (req, res) => {
         const result = await db.query(query);
         res.status(200).json(result.rows);
     } catch (error) {
-        console.error('Error fetching pending exchange requests:', error);
-        res.status(500).json({ error: 'Failed to fetch pending requests.' });
+        console.error('Error fetching pending exchange requests for manager:', error);
+        res.status(500).json({ error: 'Failed to fetch pending requests.', details: error.message });
     }
 });
 
