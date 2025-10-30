@@ -28,7 +28,7 @@ router.get('/history', authenticate, async (req, res) => {
     let query = `
         SELECT 
             sil.id,
-            sil.quantity,
+            sil.quantity_changed AS quantity, -- ⭐ CRITICAL FIX: Use the correct column name and alias it to 'quantity'
             sil.issue_type,
             sil.created_at,
             p.name AS product_name,
@@ -58,7 +58,7 @@ router.get('/history', authenticate, async (req, res) => {
     if (issue_type) {
         // Issue types are defined by the enum, use IN for multiple selected types
         const types = Array.isArray(issue_type) ? issue_type : [issue_type];
-        query += ` AND sil.issue_type IN (${types.map(() => `$${paramIndex++}`).join(', ')})`;
+        query += ` AND sil.issue_type IN (${types.map(() => '$' + paramIndex++).join(', ')})`;
         params.push(...types);
     }
 
@@ -100,7 +100,6 @@ router.get('/history', authenticate, async (req, res) => {
 
     // --- Finalize Query ---
     query += ` ORDER BY sil.created_at DESC`;
-    // Optional: Add LIMIT and OFFSET for pagination if needed for large data sets
 
     try {
         const result = await db.query(query, params);
