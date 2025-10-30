@@ -299,7 +299,7 @@ router.get('/history', authenticate, async (req, res) => {
     let query;
     let values = [];
 
-    // Base Query with joins to get all necessary details
+    // Base Query to fetch exchange requests
     const baseQuery = `
         SELECT 
             er.id, 
@@ -328,7 +328,54 @@ router.get('/history', authenticate, async (req, res) => {
 
     try {
         const result = await db.query(query, values);
-        res.status(200).json(result.rows);
+        let requests = result.rows;
+
+        // 1. Collect all unique product IDs from all requests
+        const productIds = new Set();
+        requests.forEach(req => {
+            // Ensure items_requested_jsonb is an array before trying to iterate
+            if (Array.isArray(req.items_requested_jsonb)) {
+                req.items_requested_jsonb.forEach(item => {
+                    // Check if product_id is valid before adding to the set
+                    if (item.product_id) {
+                        productIds.add(item.product_id);
+                    }
+                });
+            }
+        });
+
+        // 2. Fetch product names from the products table
+        let productNamesMap = {};
+        if (productIds.size > 0) {
+            // Fetch names for all unique product IDs in one go
+            const productQuery = `
+                SELECT id, name FROM products WHERE id = ANY($1::int[])
+            `;
+            const productResult = await db.query(productQuery, [[...productIds]]);
+            
+            productResult.rows.forEach(p => {
+                productNamesMap[p.id] = p.name;
+            });
+        }
+
+        // 3. Enrich the requests with product names
+        const enrichedRequests = requests.map(req => {
+            if (!Array.isArray(req.items_requested_jsonb)) return req;
+
+            const enrichedItems = req.items_requested_jsonb.map(item => ({
+                ...item,
+                // Add the name using the map, falling back to an error message if not found
+                name: productNamesMap[item.product_id] || `Product ID ${item.product_id} Missing`
+            }));
+            
+            return {
+                ...req,
+                items_requested_jsonb: enrichedItems // Overwrite with enriched array
+            };
+        });
+
+        res.status(200).json(enrichedRequests);
+
     } catch (error) {
         console.error('Error fetching exchange history:', error);
         res.status(500).json({ error: 'Failed to fetch exchange history.' });
