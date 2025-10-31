@@ -33,7 +33,7 @@ async function calculateProductCogs(productId, client) {
         WHERE r.product_id = $1;
     `;
     const recipeResult = await client.query(recipeQuery, [productId]);
-    
+
     let cogsPerUnit = 0;
     if (recipeResult.rows.length === 0) {
         console.warn(`Product ID ${productId} has no recipe defined. COGS will be 0.`);
@@ -77,10 +77,10 @@ router.post('/upload-receipt', async (req, res) => {
 
 // POST /api/sales/process - Process a sale (UPDATED & FIXED FOR FOR UPDATE ERROR)
 router.post('/process', async (req, res) => {
-    const { 
-        cart, subtotal, tax, total, discountAmount, 
-        cashierId, paymentMethod, customerId, note, 
-        paymentReference, paymentImageUrl, status, 
+    const {
+        cart, subtotal, tax, total, discountAmount,
+        cashierId, paymentMethod, customerId, note,
+        paymentReference, paymentImageUrl, status,
         amountPaid, balanceDue, dueDate,
         freeStock // NEW: The free stock object from the frontend
     } = req.body;
@@ -174,22 +174,32 @@ router.post('/process', async (req, res) => {
 
         // --- STEP 4: Record the Sale ---
         const saleInsertQuery = `
-            INSERT INTO sales_transactions (
-                subtotal, tax_amount, total_amount, discount_amount, cashier_id, 
-                payment_method, customer_id, note, payment_reference, 
-                payment_image_url, status, amount_paid, balance_due, due_date, 
-                total_cogs
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 
-                    $11, $12, $13, $14, $15)
-            RETURNING id;
-        `;
+    INSERT INTO sales_transactions (
+        subtotal, tax_amount, total_amount, discount_amount, cashier_id, 
+        payment_method, customer_id, note, payment_reference, 
+        payment_image_url, status, amount_paid, balance_due, due_date, 
+        total_cogs, stock_source, stock_source_user_id
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 
+            $11, $12, $13, $14, $15, $16, $17)
+    RETURNING id;
+`;
 
+        // Determine stock source
+        let stockSource = 'main_inventory';
+        let stockSourceUserId = null;
+
+        if (user && user.role === 'sales' && user.load_from_demo_stock) {
+            stockSource = 'user_stock';
+            stockSourceUserId = cashierId;
+        }
+
+        // Update the saleResult call:
         const saleResult = await client.query(saleInsertQuery, [
-            subtotal, tax, total, discountAmount, cashierId, 
-            paymentMethod, customerId, note, paymentReference, 
+            subtotal, tax, total, discountAmount, cashierId,
+            paymentMethod, customerId, note, paymentReference,
             paymentImageUrl, status, amountPaid, balanceDue, dueDate,
-            totalCogs
+            totalCogs, stockSource, stockSourceUserId
         ]);
         const saleId = saleResult.rows[0].id;
 
@@ -198,71 +208,71 @@ router.post('/process', async (req, res) => {
             INSERT INTO sales_items (sale_id, product_id, quantity, price_at_sale, discount_applied)
             VALUES ($1, $2, $3, $4, $5);
         `;
-// Get discount percentage from the frontend payload if available
-let discountPercent = 0;
-if (discountAmount && subtotal > 0) {
-    discountPercent = (discountAmount / subtotal) * 100;
-}
+        // Get discount percentage from the frontend payload if available
+        let discountPercent = 0;
+        if (discountAmount && subtotal > 0) {
+            discountPercent = (discountAmount / subtotal) * 100;
+        }
 
-for (const item of cart) {
-    await client.query(itemsInsertQuery, [
-        saleId,
-        item.id,
-        item.quantity,
-        item.price,
-        discountPercent.toFixed(2) // Save as e.g., 10.00 (%)
-    ]);
-}
+        for (const item of cart) {
+            await client.query(itemsInsertQuery, [
+                saleId,
+                item.id,
+                item.quantity,
+                item.price,
+                discountPercent.toFixed(2) // Save as e.g., 10.00 (%)
+            ]);
+        }
 
 
-// --- STEP 5: Deduct Stock (Sold + FREE) ---
-for (const [productId, quantityToDeduct] of Object.entries(productsToUpdate)) {
-    let updateParams = [quantityToDeduct, productId];
-    if (stockTable === 'sales_user_stock') {
-        updateParams.push(cashierId);
-    }
+        // --- STEP 5: Deduct Stock (Sold + FREE) ---
+        for (const [productId, quantityToDeduct] of Object.entries(productsToUpdate)) {
+            let updateParams = [quantityToDeduct, productId];
+            if (stockTable === 'sales_user_stock') {
+                updateParams.push(cashierId);
+            }
 
-    const updateResult = await client.query(stockUpdateQuery, updateParams);
+            const updateResult = await client.query(stockUpdateQuery, updateParams);
 
-    if (updateResult.rowCount === 0 && stockTable === 'sales_user_stock') {
-        // Attempt to create a missing record (fallback safeguard)
-        const insertQuery = `
+            if (updateResult.rowCount === 0 && stockTable === 'sales_user_stock') {
+                // Attempt to create a missing record (fallback safeguard)
+                const insertQuery = `
             INSERT INTO sales_user_stock (user_id, product_id, quantity)
             VALUES ($1, $2, -($3))
             ON CONFLICT (user_id, product_id) DO UPDATE
             SET quantity = sales_user_stock.quantity - EXCLUDED.quantity
             RETURNING *;
         `;
-        await client.query(insertQuery, [cashierId, productId, quantityToDeduct]);
-    }
-}
+                await client.query(insertQuery, [cashierId, productId, quantityToDeduct]);
+            }
+        }
 
-// --- STEP 6: Log Free Stock + Confirm Deduction ---
-if (freeStock && freeStock.quantities) {
-    const { quantities, reason } = freeStock;
-    const logQuery = `
+        // --- STEP 6: Log Free Stock + Confirm Deduction ---
+        if (freeStock && freeStock.quantities) {
+            const { quantities, reason } = freeStock;
+            const logQuery = `
         INSERT INTO free_stock_log (sale_id, product_id, quantity, reason, recorded_by)
         VALUES ($1, $2, $3, $4, $5);
     `;
 
-    for (const [productIdStr, quantity] of Object.entries(quantities)) {
-        const productId = parseInt(productIdStr);
-        if (quantity > 0) {
-            // Log it
-            await client.query(logQuery, [saleId, productId, quantity, reason, cashierId]);
+            for (const [productIdStr, quantity] of Object.entries(quantities)) {
+                const productId = parseInt(productIdStr);
+                if (quantity > 0) {
+                    // Log it
+                    await client.query(logQuery, [saleId, productId, quantity, reason, cashierId]);
 
-            // Also reduce free items explicitly from main inventory if sales_user_stock was used
-            if (stockTable !== 'sales_user_stock') {
-                await client.query(
-                    `UPDATE inventory
+                    // Also reduce free items explicitly from main inventory if sales_user_stock was used
+                    if (stockTable !== 'sales_user_stock') {
+                        await client.query(
+                            `UPDATE inventory
                      SET quantity = quantity - $1, last_updated = NOW()
                      WHERE product_id = $2;`,
-                    [quantity, productId]
-                );
+                            [quantity, productId]
+                        );
+                    }
+                }
             }
         }
-    }
-}
 
 
         await client.query('COMMIT');
@@ -278,19 +288,27 @@ if (freeStock && freeStock.quantities) {
 });
 
 
-// GET /api/sales - Get all sales transactions with filters
+// GET /api/sales - Get all sales transactions with enhanced filters
 router.get('/', async (req, res) => {
     try {
-        const { search, startDate, endDate, transactionType, paymentMethod, status, customerId } = req.query; // Added customerId filter
+        const { 
+            search, startDate, endDate, transactionType, paymentMethod, 
+            status, customerId, stockSource, hasFreeStock, discountRange 
+        } = req.query;
+        
         let query = `
             SELECT
                 st.*,
                 c.fullname AS customer_name,
-                u_cashier.fullname AS cashier_name, -- Join users table for cashier name
-                b.name AS branch_name
+                u_cashier.fullname AS cashier_name,
+                b.name AS branch_name,
+                CASE 
+                    WHEN EXISTS (SELECT 1 FROM free_stock_log fsl WHERE fsl.sale_id = st.id) THEN true
+                    ELSE false
+                END as has_free_stock
             FROM sales_transactions st
             LEFT JOIN customers c ON st.customer_id = c.id
-            LEFT JOIN users u_cashier ON st.cashier_id = u_cashier.id -- Corrected join for cashiers
+            LEFT JOIN users u_cashier ON st.cashier_id = u_cashier.id
             LEFT JOIN branches b ON st.branch_id = b.id
             WHERE 1 = 1
         `;
@@ -329,19 +347,45 @@ router.get('/', async (req, res) => {
             params.push(status);
             paramCount++;
         }
-        if (customerId) { // New filter for customer
+        if (customerId) {
             query += ` AND st.customer_id = $${paramCount}`;
             params.push(customerId);
             paramCount++;
+        }
+        // NEW FILTERS
+        if (stockSource) {
+            query += ` AND st.stock_source = $${paramCount}`;
+            params.push(stockSource);
+            paramCount++;
+        }
+        if (hasFreeStock === 'true') {
+            query += ` AND EXISTS (SELECT 1 FROM free_stock_log fsl WHERE fsl.sale_id = st.id)`;
+        } else if (hasFreeStock === 'false') {
+            query += ` AND NOT EXISTS (SELECT 1 FROM free_stock_log fsl WHERE fsl.sale_id = st.id)`;
+        }
+        if (discountRange) {
+            switch(discountRange) {
+                case 'none':
+                    query += ` AND st.discount_amount = 0`;
+                    break;
+                case 'small':
+                    query += ` AND st.discount_amount > 0 AND st.discount_amount <= 500`;
+                    break;
+                case 'medium':
+                    query += ` AND st.discount_amount > 500 AND st.discount_amount <= 2000`;
+                    break;
+                case 'large':
+                    query += ` AND st.discount_amount > 2000`;
+                    break;
+            }
         }
 
         query += ` ORDER BY st.created_at DESC;`;
 
         const result = await db.pool.query(query, params);
-        // Customer name logic if transaction_type affects which name to display
         const salesWithNames = result.rows.map(sale => ({
             ...sale,
-            customer_name: sale.transaction_type === 'B2B' ? sale.branch_name : (sale.customer_name || 'Walk-in Customer') // Adjust as per your B2B model if it has customer_id vs branch_id
+            customer_name: sale.transaction_type === 'B2B' ? sale.branch_name : (sale.customer_name || 'Walk-in Customer')
         }));
         res.status(200).json(salesWithNames);
     } catch (error) {
@@ -406,7 +450,7 @@ router.post('/b2b', async (req, res) => {
         // Calculate total amount and COGS for B2B items
         const processedB2BItems = [];
         for (const item of items) {
-             // Check stock (similar to retail sale)
+            // Check stock (similar to retail sale)
             const stockCheckQuery = 'SELECT quantity FROM inventory WHERE product_id = $1';
             const stockCheckResult = await client.query(stockCheckQuery, [item.id]);
             if (stockCheckResult.rows.length === 0 || stockCheckResult.rows[0].quantity < item.quantity) {
@@ -482,7 +526,7 @@ router.post('/b2b', async (req, res) => {
 });
 
 
-// GET /api/sales/details/:id - Get a single sale's details
+// GET /api/sales/details/:id - Get a single sale's details with free stock
 router.get('/details/:id', async (req, res) => {
     try {
         const { id } = req.params;
@@ -490,15 +534,17 @@ router.get('/details/:id', async (req, res) => {
             SELECT
                 st.*,
                 c.fullname AS customer_name,
-                u_cashier.fullname AS cashier_name, -- Corrected join for cashiers
+                u_cashier.fullname AS cashier_name,
                 b.name AS branch_name,
                 d.name AS driver_name,
-                d.phone_number AS driver_phone_number
+                d.phone_number AS driver_phone_number,
+                u_stock.fullname as stock_source_user_name
             FROM sales_transactions st
             LEFT JOIN customers c ON st.customer_id = c.id
             LEFT JOIN branches b ON st.branch_id = b.id
             LEFT JOIN drivers d ON st.driver_id = d.id
-            LEFT JOIN users u_cashier ON st.cashier_id = u_cashier.id -- Corrected join for cashiers
+            LEFT JOIN users u_cashier ON st.cashier_id = u_cashier.id
+            LEFT JOIN users u_stock ON st.stock_source_user_id = u_stock.id
             WHERE st.id = $1;
         `;
         const itemsQuery = `
@@ -507,9 +553,18 @@ router.get('/details/:id', async (req, res) => {
             JOIN products p ON si.product_id = p.id
             WHERE si.sale_id = $1;
         `;
+        const freeStockQuery = `
+            SELECT fsl.*, p.name as product_name
+            FROM free_stock_log fsl
+            JOIN products p ON fsl.product_id = p.id
+            WHERE fsl.sale_id = $1;
+        `;
 
-        const saleResult = await db.pool.query(saleQuery, [id]);
-        const itemsResult = await db.pool.query(itemsQuery, [id]);
+        const [saleResult, itemsResult, freeStockResult] = await Promise.all([
+            db.pool.query(saleQuery, [id]),
+            db.pool.query(itemsQuery, [id]),
+            db.pool.query(freeStockQuery, [id])
+        ]);
 
         if (saleResult.rowCount === 0) {
             return res.status(404).json({ error: 'Sale not found.' });
@@ -518,6 +573,7 @@ router.get('/details/:id', async (req, res) => {
         const saleDetails = {
             ...saleResult.rows[0],
             items: itemsResult.rows,
+            free_stock_items: freeStockResult.rows
         };
 
         res.status(200).json(saleDetails);

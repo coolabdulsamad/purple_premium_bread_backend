@@ -60,6 +60,17 @@ router.get('/', async (req, res) => {
     }
 });
 
+// GET /api/users - Get all users (for dropdowns and names)
+router.get('/', async (req, res) => {
+    try {
+        const result = await db.pool.query('SELECT id, username, fullname, email, role FROM users WHERE is_active = true ORDER BY fullname ASC');
+        res.status(200).json(result.rows);
+    } catch (error) {
+        console.error('Error fetching users:', error);
+        res.status(500).json({ error: 'Failed to fetch users.', details: error.message });
+    }
+});
+
 // POST /api/users - Create a new user (for admin to add users)
 router.post('/', async (req, res) => {
     const { username, password, role, fullname, email, phone_number, gender } = req.body;
