@@ -31,6 +31,7 @@ const exchangeRoutes = require('./routes/exchange'); // ✨ Add this line
 const managerRoutes = require('./routes/manager'); // ✨ Add this line
 const stockIssueLogRoutes = require('./routes/stock-issue-log');
 const operatingExpensesRoutes = require('./routes/operatingExpenses');
+const salariesRoutes = require('./routes/salaries');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -72,6 +73,7 @@ app.use('/api/exchange', exchangeRoutes); // ✨ Add this line
 app.use('/api/manager', managerRoutes); // ✨ Add this line
 app.use('/api/stock-issue-log', stockIssueLogRoutes);
 app.use('/api/operating-expenses', operatingExpensesRoutes);
+app.use('/api/salaries', salariesRoutes);
 
 // Simple test route
 app.get('/', (req, res) => {
