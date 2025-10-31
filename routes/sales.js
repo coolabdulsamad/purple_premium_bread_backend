@@ -530,15 +530,20 @@ router.post('/b2b', async (req, res) => {
 router.get('/details/:id', async (req, res) => {
     try {
         const { id } = req.params;
+        
         const saleQuery = `
             SELECT
                 st.*,
                 c.fullname AS customer_name,
+                c.email AS customer_email,
+                c.phone AS customer_phone,
                 u_cashier.fullname AS cashier_name,
+                u_cashier.email AS cashier_email,
                 b.name AS branch_name,
                 d.name AS driver_name,
                 d.phone_number AS driver_phone_number,
-                u_stock.fullname as stock_source_user_name
+                u_stock.fullname as stock_source_user_name,
+                u_stock.username as stock_source_username
             FROM sales_transactions st
             LEFT JOIN customers c ON st.customer_id = c.id
             LEFT JOIN branches b ON st.branch_id = b.id
@@ -547,17 +552,32 @@ router.get('/details/:id', async (req, res) => {
             LEFT JOIN users u_stock ON st.stock_source_user_id = u_stock.id
             WHERE st.id = $1;
         `;
+        
         const itemsQuery = `
-            SELECT si.*, p.name AS product_name, p.image_url, p.category, p.units
+            SELECT 
+                si.*, 
+                p.name AS product_name, 
+                p.image_url, 
+                p.category, 
+                p.units,
+                p.description as product_description
             FROM sales_items si
             JOIN products p ON si.product_id = p.id
-            WHERE si.sale_id = $1;
+            WHERE si.sale_id = $1
+            ORDER BY si.id;
         `;
+        
         const freeStockQuery = `
-            SELECT fsl.*, p.name as product_name
+            SELECT 
+                fsl.*, 
+                p.name as product_name,
+                p.category as product_category,
+                u.fullname as recorded_by_name
             FROM free_stock_log fsl
             JOIN products p ON fsl.product_id = p.id
-            WHERE fsl.sale_id = $1;
+            LEFT JOIN users u ON fsl.recorded_by = u.id
+            WHERE fsl.sale_id = $1
+            ORDER BY fsl.id;
         `;
 
         const [saleResult, itemsResult, freeStockResult] = await Promise.all([
