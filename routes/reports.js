@@ -86,20 +86,20 @@ router.get('/profit-loss', async (req, res) => {
         const totalSalaries = parseFloat(salariesResult.rows[0].total_salaries);
 
         // Other Expenses (operating expenses minus any salary-related entries)
-        let otherExpensesQuery = `
-            SELECT COALESCE(SUM(amount), 0) AS other_expenses
-            FROM operating_expenses
-            WHERE status = 'active' 
-            AND (expense_type NOT ILIKE '%salary%' AND expense_type NOT ILIKE '%wage%')
-        `;
-        let otherExpensesParams = [];
-        paramIndex = 1;
+        // let otherExpensesQuery = `
+        //     SELECT COALESCE(SUM(amount), 0) AS other_expenses
+        //     FROM operating_expenses
+        //     WHERE status = 'active' 
+        //     AND (expense_type NOT ILIKE '%salary%' AND expense_type NOT ILIKE '%wage%')
+        // `;
+        // let otherExpensesParams = [];
+        // paramIndex = 1;
 
-        ({ query: otherExpensesQuery, params: otherExpensesParams, paramIndex } =
-            applyDateFilters(otherExpensesQuery, otherExpensesParams, paramIndex, startDate, endDate, 'expense_date'));
+        // ({ query: otherExpensesQuery, params: otherExpensesParams, paramIndex } =
+            // applyDateFilters(otherExpensesQuery, otherExpensesParams, paramIndex, startDate, endDate, 'expense_date'));
 
-        const otherExpensesResult = await db.query(otherExpensesQuery, otherExpensesParams);
-        const otherExpenses = parseFloat(otherExpensesResult.rows[0].other_expenses);
+        // const otherExpensesResult = await db.query(otherExpensesQuery, otherExpensesParams);
+        // const otherExpenses = parseFloat(otherExpensesResult.rows[0].other_expenses);
 
         const grossProfit = parseFloat(total_revenue) - parseFloat(total_cogs);
         const netProfit = grossProfit - totalOperatingExpenses - totalSalaries - otherExpenses;
@@ -113,7 +113,7 @@ router.get('/profit-loss', async (req, res) => {
                 grossProfit: grossProfit,
                 totalOperatingExpenses: totalOperatingExpenses,
                 totalSalaries: totalSalaries,
-                otherExpenses: otherExpenses,
+                // otherExpenses: otherExpenses,
                 netProfit: netProfit
             }
         });
