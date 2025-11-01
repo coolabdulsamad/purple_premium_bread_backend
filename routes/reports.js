@@ -359,10 +359,39 @@ router.get('/exchange-requests', async (req, res) => {
 
     try {
         const result = await db.query(query, params);
+        
+        // Process the items_requested_jsonb to include product names
+        const processedData = result.rows.map(row => {
+            let itemsDisplay = 'N/A';
+            if (row.items_requested_jsonb && Array.isArray(row.items_requested_jsonb)) {
+                itemsDisplay = row.items_requested_jsonb.map(item => {
+                    const productName = item.product_name || `Product ID: ${item.product_id}`;
+                    return `${productName} (Qty: ${item.quantity || 0})`;
+                }).join(', ');
+            } else if (typeof row.items_requested_jsonb === 'string') {
+                try {
+                    const parsedItems = JSON.parse(row.items_requested_jsonb);
+                    if (Array.isArray(parsedItems)) {
+                        itemsDisplay = parsedItems.map(item => {
+                            const productName = item.product_name || `Product ID: ${item.product_id}`;
+                            return `${productName} (Qty: ${item.quantity || 0})`;
+                        }).join(', ');
+                    }
+                } catch (e) {
+                    itemsDisplay = 'Invalid JSON format';
+                }
+            }
+            
+            return {
+                ...row,
+                items_display: itemsDisplay
+            };
+        });
+
         res.status(200).json({
             reportTitle: 'Bread Exchange Report',
             filtersUsed: { startDate, endDate, customerId, status },
-            reportData: result.rows
+            reportData: processedData
         });
     } catch (error) {
         console.error('Error generating exchange requests report:', error);
