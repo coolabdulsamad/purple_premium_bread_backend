@@ -102,7 +102,8 @@ router.get('/profit-loss', async (req, res) => {
         // const otherExpenses = parseFloat(otherExpensesResult.rows[0].other_expenses);
 
         const grossProfit = parseFloat(total_revenue) - parseFloat(total_cogs);
-        const netProfit = grossProfit - totalOperatingExpenses - totalSalaries - otherExpenses;
+        // const netProfit = grossProfit - totalOperatingExpenses - totalSalaries - otherExpenses;
+        const netProfit = grossProfit - totalOperatingExpenses - totalSalaries;
 
         res.status(200).json({
             reportTitle: 'Profit & Loss Summary',
