@@ -220,8 +220,7 @@ router.post('/process', async (req, res) => {
                 item.id,
                 item.quantity,
                 item.price,
-                // discountPercent.toFixed(2) // Save as e.g., 10.00 (%)
-                discountAmount
+                discountPercent.toFixed(2) // Save as e.g., 10.00 (%)
             ]);
         }
 
