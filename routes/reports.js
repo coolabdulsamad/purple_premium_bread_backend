@@ -49,7 +49,7 @@ router.get('/profit-loss', async (req, res) => {
         const salesResult = await db.query(revenueQuery, revenueParams);
         const { total_revenue, total_cogs, total_profit } = salesResult.rows[0];
 
-        // Total Operating Expenses
+        // Total Operating Expenses (all expenses regardless of branch association)
         let expensesQuery = `
             SELECT COALESCE(SUM(amount), 0) AS total_operating_expenses
             FROM operating_expenses
@@ -61,10 +61,11 @@ router.get('/profit-loss', async (req, res) => {
         ({ query: expensesQuery, params: expensesParams, paramIndex } =
             applyDateFilters(expensesQuery, expensesParams, paramIndex, startDate, endDate, 'expense_date'));
 
-        if (branchId) {
-            expensesQuery += ` AND recorded_by IN (SELECT id FROM users WHERE branch_id = $${paramIndex++})`;
-            expensesParams.push(parseInt(branchId));
-        }
+        // Remove branch filtering for operating expenses since users table doesn't have branch_id
+        // if (branchId) {
+        //     expensesQuery += ` AND recorded_by IN (SELECT id FROM users WHERE branch_id = $${paramIndex++})`;
+        //     expensesParams.push(parseInt(branchId));
+        // }
 
         const expensesResult = await db.query(expensesQuery, expensesParams);
         const totalOperatingExpenses = parseFloat(expensesResult.rows[0].total_operating_expenses);
@@ -84,22 +85,18 @@ router.get('/profit-loss', async (req, res) => {
         const salariesResult = await db.query(salariesQuery, salariesParams);
         const totalSalaries = parseFloat(salariesResult.rows[0].total_salaries);
 
-        // Other Expenses (from operating expenses that are not salaries)
+        // Other Expenses (operating expenses minus any salary-related entries)
         let otherExpensesQuery = `
             SELECT COALESCE(SUM(amount), 0) AS other_expenses
             FROM operating_expenses
-            WHERE status = 'active' AND expense_type != 'Salary'
+            WHERE status = 'active' 
+            AND (expense_type NOT ILIKE '%salary%' AND expense_type NOT ILIKE '%wage%')
         `;
         let otherExpensesParams = [];
         paramIndex = 1;
 
         ({ query: otherExpensesQuery, params: otherExpensesParams, paramIndex } =
             applyDateFilters(otherExpensesQuery, otherExpensesParams, paramIndex, startDate, endDate, 'expense_date'));
-
-        if (branchId) {
-            otherExpensesQuery += ` AND recorded_by IN (SELECT id FROM users WHERE branch_id = $${paramIndex++})`;
-            otherExpensesParams.push(parseInt(branchId));
-        }
 
         const otherExpensesResult = await db.query(otherExpensesQuery, otherExpensesParams);
         const otherExpenses = parseFloat(otherExpensesResult.rows[0].other_expenses);
@@ -224,12 +221,11 @@ router.get('/free-stock', async (req, res) => {
             p.name AS product_name,
             fsl.quantity,
             fsl.reason,
-            u.fullname AS recorded_by_name,
-            b.name AS branch_name
+            u.fullname AS recorded_by_name
+            -- Remove branch_name since users table doesn't have branch_id
         FROM free_stock_log fsl
         JOIN products p ON fsl.product_id = p.id
         LEFT JOIN users u ON fsl.recorded_by = u.id
-        LEFT JOIN branches b ON u.branch_id = b.id
         WHERE 1=1
     `;
     let params = [];
@@ -241,10 +237,11 @@ router.get('/free-stock', async (req, res) => {
         query += ` AND fsl.product_id = $${paramIndex++}`;
         params.push(parseInt(productId));
     }
-    if (branchId) {
-        query += ` AND u.branch_id = $${paramIndex++}`;
-        params.push(parseInt(branchId));
-    }
+    // Remove branch filtering since users table doesn't have branch_id
+    // if (branchId) {
+    //     query += ` AND u.branch_id = $${paramIndex++}`;
+    //     params.push(parseInt(branchId));
+    // }
 
     query += ` ORDER BY fsl.recorded_at DESC;`;
 
@@ -273,9 +270,11 @@ router.get('/discount-analysis', async (req, res) => {
             COALESCE(c.fullname, 'Walk-in Customer') AS customer_name,
             p.name AS product_name,
             si.quantity,
-            (si.price_at_sale + si.discount_applied) AS original_price,
-            si.discount_applied,
-            si.price_at_sale,
+            -- Calculate original price and discount amount correctly
+            (si.price_at_sale / (1 - (si.discount_applied/100))) AS original_price,
+            ((si.price_at_sale / (1 - (si.discount_applied/100))) - si.price_at_sale) AS discount_amount,
+            si.discount_applied AS discount_percentage,
+            si.price_at_sale AS discounted_price,
             u.fullname AS cashier_name,
             b.name AS branch_name
         FROM sales_items si
