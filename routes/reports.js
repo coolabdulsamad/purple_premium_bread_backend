@@ -271,11 +271,11 @@ router.get('/discount-analysis', async (req, res) => {
             COALESCE(c.fullname, 'Walk-in Customer') AS customer_name,
             p.name AS product_name,
             si.quantity,
-            -- Calculate original price and discount amount correctly
-            (si.price_at_sale / (1 - (si.discount_applied/100))) AS original_price,
-            ((si.price_at_sale / (1 - (si.discount_applied/100))) - si.price_at_sale) AS discount_amount,
+            -- CORRECT CALCULATIONS:
+            si.price_at_sale AS original_price,
+            (si.price_at_sale * (si.discount_applied/100)) AS discount_amount,
             si.discount_applied AS discount_percentage,
-            si.price_at_sale AS discounted_price,
+            (si.price_at_sale - (si.price_at_sale * (si.discount_applied/100))) AS final_price,
             u.fullname AS cashier_name,
             b.name AS branch_name
         FROM sales_items si
