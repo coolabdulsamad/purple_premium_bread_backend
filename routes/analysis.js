@@ -973,38 +973,56 @@ router.get('/staff-performance', async (req, res) => {
 router.get('/branch-performance', async (req, res) => {
     const { startDate, endDate, metric = 'sales', limit = 10 } = req.query;
     
-    let selectField = '';
+    // First, let's get the correct field for performance metric
+    let performanceField = '';
+    let performanceLabel = '';
+    
     switch (metric) {
         case 'sales':
-            selectField = 'COALESCE(SUM(st.total_amount), 0)';
+            performanceField = 'COALESCE(SUM(st.total_amount), 0)';
+            performanceLabel = 'Total Sales (₦)';
             break;
         case 'profit':
             // Use CORRECT profit calculation
-            selectField = 'COALESCE(SUM(st.total_amount - st.total_cogs), 0)';
+            performanceField = 'COALESCE(SUM(st.total_amount - st.total_cogs), 0)';
+            performanceLabel = 'Total Profit (₦)';
             break;
         case 'customers':
-            selectField = 'COUNT(DISTINCT st.customer_id)';
+            performanceField = 'COUNT(DISTINCT st.customer_id)';
+            performanceLabel = 'Unique Customers';
             break;
         case 'transactions':
-            selectField = 'COUNT(st.id)';
+            performanceField = 'COUNT(st.id)';
+            performanceLabel = 'Total Transactions';
             break;
         default:
-            selectField = 'COALESCE(SUM(st.total_amount), 0)';
+            performanceField = 'COALESCE(SUM(st.total_amount), 0)';
+            performanceLabel = 'Total Sales (₦)';
     }
 
     let query = `
         SELECT 
             b.id AS branch_id,
             b.name AS branch_name,
-            ${selectField} AS performance_metric,
+            ${performanceField} AS performance_metric,
+            -- Always calculate all metrics for comprehensive data
             COUNT(st.id) AS total_transactions,
             COALESCE(SUM(st.total_amount), 0) AS total_sales,
             COALESCE(SUM(st.total_cogs), 0) AS total_cogs,
-            -- Calculate profit correctly
+            -- Calculate profit correctly for ALL branches
             COALESCE(SUM(st.total_amount - st.total_cogs), 0) AS total_profit,
             COALESCE(SUM(st.total_profit), 0) AS stored_profit_incorrect,
             COUNT(DISTINCT st.customer_id) AS unique_customers,
-            AVG(st.total_amount) AS avg_transaction_value
+            CASE 
+                WHEN COUNT(st.id) > 0 THEN COALESCE(AVG(st.total_amount), 0)
+                ELSE 0 
+            END AS avg_transaction_value,
+            -- Profit margin calculation
+            CASE 
+                WHEN COALESCE(SUM(st.total_amount), 0) > 0 THEN
+                    (COALESCE(SUM(st.total_amount - st.total_cogs), 0) / COALESCE(SUM(st.total_amount), 0)) * 100
+                ELSE 0
+            END AS profit_margin_percentage
         FROM branches b
         LEFT JOIN sales_transactions st ON b.id = st.branch_id AND st.status != 'Cancelled'
         WHERE 1=1
@@ -1024,14 +1042,20 @@ router.get('/branch-performance', async (req, res) => {
     try {
         const result = await db.query(query, params);
         
-        // Log any profit discrepancies
+        console.log('Branch Performance - Profit Analysis:', {
+            metric: metric,
+            branches_analyzed: result.rows.length,
+            profit_calculation: 'Using (Sales - COGS) for all profit metrics'
+        });
+
+        // Log any profit discrepancies for debugging
         result.rows.forEach(branch => {
             if (parseFloat(branch.total_profit) !== parseFloat(branch.stored_profit_incorrect)) {
                 console.log('Branch Profit Correction:', {
                     branch: branch.branch_name,
                     correct_profit: branch.total_profit,
                     incorrect_stored_profit: branch.stored_profit_incorrect,
-                    discrepancy: branch.total_profit - branch.stored_profit_incorrect
+                    discrepancy: (branch.total_profit - branch.stored_profit_incorrect).toFixed(2)
                 });
             }
         });
@@ -1040,18 +1064,21 @@ router.get('/branch-performance', async (req, res) => {
             branch_id: branch.branch_id,
             branch_name: branch.branch_name,
             performance_metric: parseFloat(branch.performance_metric),
+            performance_label: performanceLabel,
             total_transactions: parseInt(branch.total_transactions),
             total_sales: parseFloat(branch.total_sales),
+            total_cogs: parseFloat(branch.total_cogs),
             total_profit: parseFloat(branch.total_profit), // CORRECT profit
             unique_customers: parseInt(branch.unique_customers),
             avg_transaction_value: parseFloat(branch.avg_transaction_value),
-            profit_margin_percentage: branch.total_sales > 0 ? (branch.total_profit / branch.total_sales * 100) : 0
+            profit_margin_percentage: parseFloat(branch.profit_margin_percentage),
+            data_quality: parseFloat(branch.total_profit) !== parseFloat(branch.stored_profit_incorrect) ? 'corrected' : 'consistent'
         }));
 
         res.status(200).json({
             filtersUsed: { startDate, endDate, metric, limit },
             reportData: branchData,
-            data_note: metric === 'profit' ? 'Profit calculated as (Sales - COGS)' : 'All metrics use corrected calculations'
+            data_note: `Profit metrics calculated as (Sales - COGS). Showing ${metric} performance.`
         });
     } catch (error) {
         console.error('Error fetching branch performance analysis:', error);
