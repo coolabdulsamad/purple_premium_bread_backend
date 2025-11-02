@@ -499,7 +499,7 @@ router.get('/raw-material-stock-value-trend', async (req, res) => {
     }
 });
 
-// GET /api/analysis/customer-lifetime-value
+// GET /api/analysis/customer-lifetime-value - Include ALL customers
 router.get('/customer-lifetime-value', async (req, res) => {
     const { startDate, endDate, customerId, limit = 10, branchId } = req.query;
 
@@ -507,64 +507,91 @@ router.get('/customer-lifetime-value', async (req, res) => {
         SELECT
             c.id AS customer_id,
             c.fullname AS customer_name,
-            COALESCE(SUM(st.total_profit), 0) AS total_profit_generated,
-            COUNT(st.id) AS total_transactions,
-            EXTRACT(EPOCH FROM (MAX(st.sale_date) - MIN(st.sale_date))) / (3600 * 24 * 30.5) AS customer_lifespan_months,
-            COALESCE(SUM(st.total_amount), 0) AS total_revenue_generated
+            COALESCE(SUM(CASE WHEN st.status != 'Cancelled' THEN st.total_amount - st.total_cogs ELSE 0 END), 0) AS total_profit_generated,
+            COUNT(CASE WHEN st.status != 'Cancelled' THEN st.id END) AS total_transactions,
+            COALESCE(SUM(CASE WHEN st.status != 'Cancelled' THEN st.total_amount ELSE 0 END), 0) AS total_revenue_generated,
+            CASE 
+                WHEN MIN(st.sale_date) IS NOT NULL THEN
+                    EXTRACT(EPOCH FROM (COALESCE(MAX(st.sale_date), CURRENT_TIMESTAMP) - MIN(st.sale_date))) / (3600 * 24 * 30.5)
+                ELSE 0
+            END AS customer_lifespan_months,
+            c.created_at AS customer_since
         FROM customers c
-        JOIN sales_transactions st ON c.id = st.customer_id
-        WHERE st.status != 'Cancelled'
+        LEFT JOIN sales_transactions st ON c.id = st.customer_id
+        WHERE (c.is_active IS NULL OR c.is_active = true)
     `;
     let params = [];
     let paramIndex = 1;
 
-    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'st.sale_date'));
+    // Apply date filters to transactions
+    if (startDate) {
+        query += ` AND (st.sale_date IS NULL OR st.sale_date >= $${paramIndex++})`;
+        params.push(startDate);
+    }
+    if (endDate) {
+        const endOfDay = new Date(endDate);
+        endOfDay.setDate(endOfDay.getDate() + 1);
+        query += ` AND (st.sale_date IS NULL OR st.sale_date < $${paramIndex++})`;
+        params.push(endOfDay.toISOString());
+    }
 
     if (customerId) {
         query += ` AND c.id = $${paramIndex++}`;
         params.push(parseInt(customerId));
     }
-    if (branchId) {
-        query += ` AND st.branch_id = $${paramIndex++}`;
-        params.push(parseInt(branchId));
-    }
 
     query += `
-        GROUP BY c.id, c.fullname
-        HAVING COUNT(st.id) > 0
-        ORDER BY total_profit_generated DESC
+        GROUP BY c.id, c.fullname, c.created_at
+        ORDER BY total_profit_generated DESC, c.created_at DESC
     `;
 
-    ({ query, params, paramIndex } = applyLimit(query, params, paramIndex, limit));
+    // Apply limit
+    if (limit && limit > 0) {
+        query += ` LIMIT $${paramIndex++}`;
+        params.push(parseInt(limit));
+    }
 
     try {
         const result = await db.query(query, params);
         
+        console.log('CLTV Data (All Customers):', {
+            total_customers: result.rows.length,
+            customer_names: result.rows.map(r => r.customer_name),
+            customers_with_transactions: result.rows.filter(r => r.total_transactions > 0).length,
+            customers_without_transactions: result.rows.filter(r => r.total_transactions === 0).length
+        });
+
         const cltvData = result.rows.map(row => {
             const totalProfitGenerated = parseFloat(row.total_profit_generated);
             const totalTransactions = parseInt(row.total_transactions);
             const customerLifespanMonths = parseFloat(row.customer_lifespan_months);
+            const totalRevenue = parseFloat(row.total_revenue_generated);
 
-            const avgProfitPerTransaction = totalTransactions > 0 ? totalProfitGenerated / totalTransactions : 0;
-            const avgTransactionsPerMonth = customerLifespanMonths > 0 ? totalTransactions / customerLifespanMonths : 0;
-            
-            const estimatedFutureLifespanMonths = 24;
-            const approximatedCLTV = avgProfitPerTransaction * avgTransactionsPerMonth * estimatedFutureLifespanMonths;
+            // Calculate CLTV - for customers with 0 transactions, show 0 or minimal value
+            let approximatedCLTV = 0;
+            if (totalTransactions > 0 && customerLifespanMonths > 0) {
+                const avgProfitPerTransaction = totalProfitGenerated / totalTransactions;
+                const avgTransactionsPerMonth = totalTransactions / customerLifespanMonths;
+                const estimatedFutureLifespanMonths = 24;
+                approximatedCLTV = avgProfitPerTransaction * avgTransactionsPerMonth * estimatedFutureLifespanMonths;
+            }
 
             return {
                 customer_id: row.customer_id,
                 customer_name: row.customer_name,
                 total_profit_generated: totalProfitGenerated,
+                total_revenue_generated: totalRevenue,
                 total_transactions: totalTransactions,
                 customer_lifespan_months: customerLifespanMonths.toFixed(1),
                 approximated_cltv: Math.max(0, approximatedCLTV),
-                total_revenue_generated: parseFloat(row.total_revenue_generated)
+                has_transactions: totalTransactions > 0
             };
         });
 
         res.status(200).json({
             filtersUsed: { startDate, endDate, customerId, limit, branchId },
-            reportData: cltvData
+            reportData: cltvData,
+            data_note: 'Includes all customers, even those with 0 transactions'
         });
 
     } catch (error) {
@@ -1127,28 +1154,38 @@ router.get('/sales-summary', async (req, res) => {
     }
 });
 
-// GET /api/analysis/customer-count - Count unique customers in period
+// GET /api/analysis/customer-count - Count ALL customers (including those with 0 transactions)
 router.get('/customer-count', async (req, res) => {
     const { startDate, endDate, branchId } = req.query;
     
     let query = `
         SELECT 
-            COUNT(DISTINCT customer_id) AS total_customers
-        FROM sales_transactions 
-        WHERE status != 'Cancelled' AND customer_id IS NOT NULL
+            COUNT(*) AS total_customers
+        FROM customers c
+        WHERE c.is_active IS NULL OR c.is_active = true
     `;
     let params = [];
     let paramIndex = 1;
 
-    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'sale_date'));
-
-    if (branchId) {
-        query += ` AND branch_id = $${paramIndex++}`;
-        params.push(parseInt(branchId));
+    // If date range is provided, only count customers created in that period
+    if (startDate) {
+        query += ` AND c.created_at >= $${paramIndex++}`;
+        params.push(startDate);
+    }
+    if (endDate) {
+        const endOfDay = new Date(endDate);
+        endOfDay.setDate(endOfDay.getDate() + 1);
+        query += ` AND c.created_at < $${paramIndex++}`;
+        params.push(endOfDay.toISOString());
     }
 
     try {
         const result = await db.query(query, params);
+        console.log('Customer Count (All Customers):', {
+            total_customers: result.rows[0].total_customers,
+            filters: { startDate, endDate, branchId }
+        });
+        
         res.status(200).json({
             filtersUsed: { startDate, endDate, branchId },
             reportData: result.rows[0]
