@@ -54,15 +54,24 @@ const applyDateFilters = (baseQuery, baseParams, initialParamIndex, startDate, e
     return { query, params, paramIndex };
 };
 
+// Helper function to apply limit
+const applyLimit = (query, params, paramIndex, limit = 10) => {
+    if (limit && limit > 0) {
+        query += ` LIMIT $${paramIndex++}`;
+        params.push(parseInt(limit));
+    }
+    return { query, params, paramIndex };
+};
+
 // GET /api/analysis/sales-comparison - Compare sales/profit for current vs previous period
 router.get('/sales-comparison', async (req, res) => {
-    const { period = 'month', branchId } = req.query; // Added branchId filter
+    const { period = 'month', branchId } = req.query;
     const { currentPeriodStart, currentPeriodEnd, previousPeriodStart, previousPeriodEnd } = getComparisonDates(period);
 
     let currentQueryParams = [currentPeriodStart, currentPeriodEnd];
     let previousQueryParams = [previousPeriodStart, previousPeriodEnd];
     let branchFilter = '';
-    let paramIndex = 3; // Start from 3 because $1 and $2 are already used for dates
+    let paramIndex = 3;
 
     if (branchId) {
         branchFilter = ` AND branch_id = $${paramIndex++}`;
@@ -114,7 +123,7 @@ router.get('/sales-comparison', async (req, res) => {
 
 // GET /api/analysis/profit-margin-trend - Gross Profit Margin over time
 router.get('/profit-margin-trend', async (req, res) => {
-    const { period = 'month', limit = 12, branchId } = req.query; // Added branchId filter
+    const { period = 'month', limit = 12, branchId, startDate, endDate } = req.query;
     let groupBy;
     let orderBy;
 
@@ -139,10 +148,12 @@ router.get('/profit-margin-trend', async (req, res) => {
         FROM sales_transactions
         WHERE status != 'Cancelled'
     `;
-    let params = [parseInt(limit)]; // Ensure limit is an integer
-    let paramIndex = 2; // For limit, which is $1 in the query
+    let params = [];
+    let paramIndex = 1;
 
-    if (branchId) { // Apply branch filter
+    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'sale_date'));
+
+    if (branchId) {
         query += ` AND branch_id = $${paramIndex++}`;
         params.push(parseInt(branchId));
     }
@@ -150,13 +161,14 @@ router.get('/profit-margin-trend', async (req, res) => {
     query += `
         GROUP BY period_label
         ORDER BY period_label DESC
-        LIMIT $1;
+        LIMIT $${paramIndex++};
     `;
+    params.push(parseInt(limit));
 
     try {
         const result = await db.query(query, params);
         res.status(200).json({
-            filtersUsed: { period, limit, branchId },
+            filtersUsed: { period, limit, branchId, startDate, endDate },
             reportData: result.rows.reverse()
         });
     } catch (error) {
@@ -173,9 +185,8 @@ router.get('/inventory-turnover', async (req, res) => {
     let dateParams = [];
     let dateParamIndex = 1;
 
-    // Apply date filters if provided
     ({ query: dateFilter, params: dateParams, paramIndex: dateParamIndex } = applyDateFilters(
-        '', dateParams, dateParamIndex, startDate, endDate, 'st.sale_date' // Use sale_date for COGS calculation
+        '', dateParams, dateParamIndex, startDate, endDate, 'st.sale_date'
     ));
 
     try {
@@ -197,7 +208,6 @@ router.get('/inventory-turnover', async (req, res) => {
             totalCogsParams.push(parseInt(productId));
         }
         if (branchId) {
-            // Apply branch filter to sales transactions
             totalCogsQuery += ` AND st.branch_id = $${cogsParamIndex++}`;
             totalCogsParams.push(parseInt(branchId));
         }
@@ -232,7 +242,7 @@ router.get('/inventory-turnover', async (req, res) => {
             reportData: {
                 productId: productId || 'All Products',
                 cogs: cogs,
-                averageInventoryValue: currentInventoryValue, // Using current as proxy for average
+                averageInventoryValue: currentInventoryValue,
                 inventoryTurnoverRate: turnoverRate,
                 explanation: "Inventory turnover rate (COGS / Average Inventory Value). Note: Average inventory is approximated using current stock value for simplicity."
             }
@@ -244,16 +254,16 @@ router.get('/inventory-turnover', async (req, res) => {
     }
 });
 
-// NEW ANALYTICS: GET /api/analysis/sales-trend-by-category-product
+// GET /api/analysis/sales-trend-by-category-product
 router.get('/sales-trend-by-category-product', async (req, res) => {
-    const { startDate, endDate, category, productId, period = 'month', branchId } = req.query;
+    const { startDate, endDate, category, productId, period = 'month', branchId, limit = 50 } = req.query;
     let groupBy;
     let orderBy;
 
     if (period === 'month') {
         groupBy = `TO_CHAR(st.sale_date, 'YYYY-MM')`;
         orderBy = `TO_CHAR(st.sale_date, 'YYYY-MM')`;
-    } else { // default 'day'
+    } else {
         groupBy = `DATE(st.sale_date)`;
         orderBy = `DATE(st.sale_date)`;
     }
@@ -287,13 +297,15 @@ router.get('/sales-trend-by-category-product', async (req, res) => {
 
     query += `
         GROUP BY period_label
-        ORDER BY period_label ASC;
+        ORDER BY period_label ASC
     `;
+
+    ({ query, params, paramIndex } = applyLimit(query, params, paramIndex, limit));
 
     try {
         const result = await db.query(query, params);
         res.status(200).json({
-            filtersUsed: { startDate, endDate, category, productId, period, branchId },
+            filtersUsed: { startDate, endDate, category, productId, period, branchId, limit },
             reportData: result.rows
         });
     } catch (error) {
@@ -302,7 +314,7 @@ router.get('/sales-trend-by-category-product', async (req, res) => {
     }
 });
 
-// NEW ANALYTICS: GET /api/analysis/top-customers-by-sales
+// GET /api/analysis/top-customers-by-sales
 router.get('/top-customers-by-sales', async (req, res) => {
     const { startDate, endDate, limit = 10, branchId } = req.query;
     let query = `
@@ -328,9 +340,9 @@ router.get('/top-customers-by-sales', async (req, res) => {
     query += `
         GROUP BY c.id, c.fullname
         ORDER BY total_sales_amount DESC
-        LIMIT $${paramIndex++};
     `;
-    params.push(parseInt(limit));
+
+    ({ query, params, paramIndex } = applyLimit(query, params, paramIndex, limit));
 
     try {
         const result = await db.query(query, params);
@@ -344,16 +356,16 @@ router.get('/top-customers-by-sales', async (req, res) => {
     }
 });
 
-// NEW ANALYTICS: GET /api/analysis/production-waste-over-time
+// GET /api/analysis/production-waste-over-time
 router.get('/production-waste-over-time', async (req, res) => {
-    const { startDate, endDate, period = 'month', branchId } = req.query;
+    const { startDate, endDate, period = 'month', branchId, limit = 50 } = req.query;
     let groupBy;
     let orderBy;
 
     if (period === 'month') {
         groupBy = `TO_CHAR(pl.production_date, 'YYYY-MM')`;
         orderBy = `TO_CHAR(pl.production_date, 'YYYY-MM')`;
-    } else { // default 'day'
+    } else {
         groupBy = `DATE(pl.production_date)`;
         orderBy = `DATE(pl.production_date)`;
     }
@@ -378,13 +390,15 @@ router.get('/production-waste-over-time', async (req, res) => {
 
     query += `
         GROUP BY period_label
-        ORDER BY period_label ASC;
+        ORDER BY period_label ASC
     `;
+
+    ({ query, params, paramIndex } = applyLimit(query, params, paramIndex, limit));
 
     try {
         const result = await db.query(query, params);
         res.status(200).json({
-            filtersUsed: { startDate, endDate, period, branchId },
+            filtersUsed: { startDate, endDate, period, branchId, limit },
             reportData: result.rows
         });
     } catch (error) {
@@ -393,15 +407,15 @@ router.get('/production-waste-over-time', async (req, res) => {
     }
 });
 
-// NEW ANALYTICS: GET /api/analysis/raw-material-stock-value-trend
+// GET /api/analysis/raw-material-stock-value-trend
 router.get('/raw-material-stock-value-trend', async (req, res) => {
-    const { startDate, endDate, rawMaterialId, period = 'month', branchId } = req.query;
+    const { startDate, endDate, rawMaterialId, period = 'month', branchId, limit = 50 } = req.query;
 
     let groupBy;
 
     if (period === 'month') {
         groupBy = `TO_CHAR(dmv.date_key, 'YYYY-MM')`;
-    } else { // default 'day'
+    } else {
         groupBy = `DATE(dmv.date_key)`;
     }
 
@@ -446,13 +460,15 @@ router.get('/raw-material-stock-value-trend', async (req, res) => {
             period_stock_value_change,
             SUM(period_stock_value_change) OVER (ORDER BY period_label ASC) AS cumulative_stock_value
         FROM AggregatedValue
-        ORDER BY period_label ASC;
+        ORDER BY period_label ASC
     `;
+
+    ({ query, params, paramIndex } = applyLimit(query, params, paramIndex, limit));
 
     try {
         const result = await db.query(query, params);
         res.status(200).json({
-            filtersUsed: { startDate, endDate, rawMaterialId, period, branchId },
+            filtersUsed: { startDate, endDate, rawMaterialId, period, branchId, limit },
             reportData: result.rows.map(row => ({
                 period_label: row.period_label,
                 stock_value_change: parseFloat(row.period_stock_value_change),
@@ -465,7 +481,7 @@ router.get('/raw-material-stock-value-trend', async (req, res) => {
     }
 });
 
-// NEW ANALYTICS: GET /api/analysis/customer-lifetime-value
+// GET /api/analysis/customer-lifetime-value
 router.get('/customer-lifetime-value', async (req, res) => {
     const { startDate, endDate, customerId, limit = 10, branchId } = req.query;
 
@@ -497,11 +513,11 @@ router.get('/customer-lifetime-value', async (req, res) => {
 
     query += `
         GROUP BY c.id, c.fullname
-        HAVING COUNT(st.id) > 0 -- Only include customers with sales
+        HAVING COUNT(st.id) > 0
         ORDER BY total_profit_generated DESC
-        LIMIT $${paramIndex++};
     `;
-    params.push(parseInt(limit));
+
+    ({ query, params, paramIndex } = applyLimit(query, params, paramIndex, limit));
 
     try {
         const result = await db.query(query, params);
@@ -539,9 +555,9 @@ router.get('/customer-lifetime-value', async (req, res) => {
     }
 });
 
-// NEW ANALYTICS: GET /api/analysis/free-items - Analyze free items given
+// GET /api/analysis/free-items - Analyze free items given
 router.get('/free-items', async (req, res) => {
-    const { startDate, endDate, productId, branchId } = req.query;
+    const { startDate, endDate, productId, branchId, limit = 10 } = req.query;
     
     let query = `
         SELECT 
@@ -572,13 +588,15 @@ router.get('/free-items', async (req, res) => {
 
     query += `
         GROUP BY p.name, fsl.reason, TO_CHAR(fsl.recorded_at, 'YYYY-MM'), u.fullname
-        ORDER BY total_quantity DESC;
+        ORDER BY total_quantity DESC
     `;
+
+    ({ query, params, paramIndex } = applyLimit(query, params, paramIndex, limit));
 
     try {
         const result = await db.query(query, params);
         res.status(200).json({
-            filtersUsed: { startDate, endDate, productId, branchId },
+            filtersUsed: { startDate, endDate, productId, branchId, limit },
             reportData: result.rows
         });
     } catch (error) {
@@ -587,9 +605,9 @@ router.get('/free-items', async (req, res) => {
     }
 });
 
-// NEW ANALYTICS: GET /api/analysis/discounts - Analyze discount patterns
+// GET /api/analysis/discounts - Analyze discount patterns
 router.get('/discounts', async (req, res) => {
-    const { startDate, endDate, branchId } = req.query;
+    const { startDate, endDate, branchId, limit = 50 } = req.query;
     
     let query = `
         SELECT 
@@ -597,7 +615,7 @@ router.get('/discounts', async (req, res) => {
             SUM(st.discount_amount) AS total_discount,
             COUNT(st.id) AS total_transactions,
             AVG(st.discount_amount) AS avg_discount_per_transaction,
-            (SUM(st.discount_amount) / SUM(st.total_amount)) * 100 AS discount_percentage_of_sales
+            (SUM(st.discount_amount) / NULLIF(SUM(st.total_amount), 0)) * 100 AS discount_percentage_of_sales
         FROM sales_transactions st
         WHERE st.status != 'Cancelled' AND st.discount_amount > 0
     `;
@@ -613,13 +631,15 @@ router.get('/discounts', async (req, res) => {
 
     query += `
         GROUP BY TO_CHAR(st.sale_date, 'YYYY-MM')
-        ORDER BY period_label ASC;
+        ORDER BY period_label ASC
     `;
+
+    ({ query, params, paramIndex } = applyLimit(query, params, paramIndex, limit));
 
     try {
         const result = await db.query(query, params);
         res.status(200).json({
-            filtersUsed: { startDate, endDate, branchId },
+            filtersUsed: { startDate, endDate, branchId, limit },
             reportData: result.rows
         });
     } catch (error) {
@@ -628,9 +648,9 @@ router.get('/discounts', async (req, res) => {
     }
 });
 
-// NEW ANALYTICS: GET /api/analysis/exchanges - Analyze bread exchanges
+// GET /api/analysis/exchanges - Analyze bread exchanges
 router.get('/exchanges', async (req, res) => {
-    const { startDate, endDate, status, branchId } = req.query;
+    const { startDate, endDate, status, branchId, limit = 10 } = req.query;
     
     let query = `
         SELECT 
@@ -664,13 +684,15 @@ router.get('/exchanges', async (req, res) => {
 
     query += `
         GROUP BY er.status, TO_CHAR(er.created_at, 'YYYY-MM'), c.fullname, u.fullname
-        ORDER BY period_label DESC, total_exchanges DESC;
+        ORDER BY period_label DESC, total_exchanges DESC
     `;
+
+    ({ query, params, paramIndex } = applyLimit(query, params, paramIndex, limit));
 
     try {
         const result = await db.query(query, params);
         res.status(200).json({
-            filtersUsed: { startDate, endDate, status, branchId },
+            filtersUsed: { startDate, endDate, status, branchId, limit },
             reportData: result.rows
         });
     } catch (error) {
@@ -679,9 +701,9 @@ router.get('/exchanges', async (req, res) => {
     }
 });
 
-// NEW ANALYTICS: GET /api/analysis/stock-allocation - Analyze stock allocation to sales users
+// GET /api/analysis/stock-allocation - Analyze stock allocation to sales users
 router.get('/stock-allocation', async (req, res) => {
-    const { userId, productId, branchId } = req.query;
+    const { userId, productId, branchId, limit = 10 } = req.query;
     
     let query = `
         SELECT 
@@ -714,12 +736,14 @@ router.get('/stock-allocation', async (req, res) => {
         params.push(parseInt(branchId));
     }
 
-    query += ` ORDER BY stock_value DESC, u.fullname ASC;`;
+    query += ` ORDER BY stock_value DESC, u.fullname ASC`;
+
+    ({ query, params, paramIndex } = applyLimit(query, params, paramIndex, limit));
 
     try {
         const result = await db.query(query, params);
         res.status(200).json({
-            filtersUsed: { userId, productId, branchId },
+            filtersUsed: { userId, productId, branchId, limit },
             reportData: result.rows
         });
     } catch (error) {
@@ -728,9 +752,9 @@ router.get('/stock-allocation', async (req, res) => {
     }
 });
 
-// NEW ANALYTICS: GET /api/analysis/salaries - Analyze salary and wages
+// GET /api/analysis/salaries - Analyze salary and wages
 router.get('/salaries', async (req, res) => {
-    const { startDate, endDate, userId, branchId } = req.query;
+    const { startDate, endDate, userId, branchId, limit = 10 } = req.query;
     
     let query = `
         SELECT 
@@ -757,12 +781,14 @@ router.get('/salaries', async (req, res) => {
         params.push(parseInt(userId));
     }
 
-    query += ` ORDER BY sp.salary_period DESC, sp.net_amount DESC;`;
+    query += ` ORDER BY sp.salary_period DESC, sp.net_amount DESC`;
+
+    ({ query, params, paramIndex } = applyLimit(query, params, paramIndex, limit));
 
     try {
         const result = await db.query(query, params);
         res.status(200).json({
-            filtersUsed: { startDate, endDate, userId, branchId },
+            filtersUsed: { startDate, endDate, userId, branchId, limit },
             reportData: result.rows
         });
     } catch (error) {
@@ -771,9 +797,9 @@ router.get('/salaries', async (req, res) => {
     }
 });
 
-// NEW ANALYTICS: GET /api/analysis/operating-expenses - Analyze operating expenses
+// GET /api/analysis/operating-expenses - Analyze operating expenses
 router.get('/operating-expenses', async (req, res) => {
-    const { startDate, endDate, category, branchId } = req.query;
+    const { startDate, endDate, category, branchId, limit = 10 } = req.query;
     
     let baseCondition = startDate && endDate ? 
         `AND expense_date BETWEEN '${startDate}' AND '${endDate}'` : 
@@ -785,7 +811,7 @@ router.get('/operating-expenses', async (req, res) => {
             SUM(oe.amount) AS total_amount,
             TO_CHAR(oe.expense_date, 'YYYY-MM') AS period_label,
             COUNT(oe.id) AS total_expenses,
-            (SUM(oe.amount) / (SELECT COALESCE(SUM(amount), 1) FROM operating_expenses WHERE 1=1 ${baseCondition})) * 100 AS percentage
+            (SUM(oe.amount) / NULLIF((SELECT COALESCE(SUM(amount), 1) FROM operating_expenses WHERE 1=1 ${baseCondition}), 0)) * 100 AS percentage
         FROM operating_expenses oe
         WHERE 1=1
     `;
@@ -805,13 +831,15 @@ router.get('/operating-expenses', async (req, res) => {
 
     query += `
         GROUP BY oe.category, TO_CHAR(oe.expense_date, 'YYYY-MM')
-        ORDER BY total_amount DESC;
+        ORDER BY total_amount DESC
     `;
+
+    ({ query, params, paramIndex } = applyLimit(query, params, paramIndex, limit));
 
     try {
         const result = await db.query(query, params);
         res.status(200).json({
-            filtersUsed: { startDate, endDate, category, branchId },
+            filtersUsed: { startDate, endDate, category, branchId, limit },
             reportData: result.rows
         });
     } catch (error) {
@@ -820,9 +848,9 @@ router.get('/operating-expenses', async (req, res) => {
     }
 });
 
-// NEW ANALYTICS: GET /api/analysis/staff-performance - Analyze staff performance
+// GET /api/analysis/staff-performance - Analyze staff performance
 router.get('/staff-performance', async (req, res) => {
-    const { startDate, endDate, role } = req.query;
+    const { startDate, endDate, role, limit = 10 } = req.query;
     
     let query = `
         SELECT 
@@ -849,13 +877,15 @@ router.get('/staff-performance', async (req, res) => {
 
     query += `
         GROUP BY u.id, u.fullname, u.role
-        ORDER BY total_sales DESC;
+        ORDER BY total_sales DESC
     `;
+
+    ({ query, params, paramIndex } = applyLimit(query, params, paramIndex, limit));
 
     try {
         const result = await db.query(query, params);
         res.status(200).json({
-            filtersUsed: { startDate, endDate, role },
+            filtersUsed: { startDate, endDate, role, limit },
             reportData: result.rows
         });
     } catch (error) {
@@ -864,9 +894,9 @@ router.get('/staff-performance', async (req, res) => {
     }
 });
 
-// NEW ANALYTICS: GET /api/analysis/branch-performance - Compare branch performance
+// GET /api/analysis/branch-performance - Compare branch performance
 router.get('/branch-performance', async (req, res) => {
-    const { startDate, endDate, metric = 'sales' } = req.query;
+    const { startDate, endDate, metric = 'sales', limit = 10 } = req.query;
     
     let selectField = '';
     switch (metric) {
@@ -906,13 +936,15 @@ router.get('/branch-performance', async (req, res) => {
 
     query += `
         GROUP BY b.id, b.name
-        ORDER BY performance_metric DESC;
+        ORDER BY performance_metric DESC
     `;
+
+    ({ query, params, paramIndex } = applyLimit(query, params, paramIndex, limit));
 
     try {
         const result = await db.query(query, params);
         res.status(200).json({
-            filtersUsed: { startDate, endDate, metric },
+            filtersUsed: { startDate, endDate, metric, limit },
             reportData: result.rows
         });
     } catch (error) {
@@ -921,9 +953,9 @@ router.get('/branch-performance', async (req, res) => {
     }
 });
 
-// NEW ANALYTICS: GET /api/analysis/stock-issues - Analyze stock issues and transfers
+// GET /api/analysis/stock-issues - Analyze stock issues and transfers
 router.get('/stock-issues', async (req, res) => {
-    const { startDate, endDate, issueType, productId, branchId } = req.query;
+    const { startDate, endDate, issueType, productId, branchId, limit = 10 } = req.query;
     
     let query = `
         SELECT 
@@ -959,13 +991,15 @@ router.get('/stock-issues', async (req, res) => {
     query += `
         GROUP BY sil.issue_type, p.name, TO_CHAR(sil.created_at, 'YYYY-MM'), 
                  u_from.fullname, u_to.fullname, u_recorded.fullname, sil.note
-        ORDER BY period_label DESC, total_quantity DESC;
+        ORDER BY period_label DESC, total_quantity DESC
     `;
+
+    ({ query, params, paramIndex } = applyLimit(query, params, paramIndex, limit));
 
     try {
         const result = await db.query(query, params);
         res.status(200).json({
-            filtersUsed: { startDate, endDate, issueType, productId, branchId },
+            filtersUsed: { startDate, endDate, issueType, productId, branchId, limit },
             reportData: result.rows
         });
     } catch (error) {
@@ -974,9 +1008,9 @@ router.get('/stock-issues', async (req, res) => {
     }
 });
 
-// NEW ANALYTICS: GET /api/analysis/waste-analysis - Comprehensive waste analysis
+// GET /api/analysis/waste-analysis - Comprehensive waste analysis
 router.get('/waste-analysis', async (req, res) => {
-    const { startDate, endDate, productId, branchId } = req.query;
+    const { startDate, endDate, productId, branchId, limit = 10 } = req.query;
     
     let query = `
         SELECT 
@@ -1003,13 +1037,15 @@ router.get('/waste-analysis', async (req, res) => {
 
     query += `
         GROUP BY p.name, TO_CHAR(ws.date_recorded, 'YYYY-MM'), ws.reason, u.fullname, p.price
-        ORDER BY waste_value DESC, total_waste_quantity DESC;
+        ORDER BY waste_value DESC, total_waste_quantity DESC
     `;
+
+    ({ query, params, paramIndex } = applyLimit(query, params, paramIndex, limit));
 
     try {
         const result = await db.query(query, params);
         res.status(200).json({
-            filtersUsed: { startDate, endDate, productId, branchId },
+            filtersUsed: { startDate, endDate, productId, branchId, limit },
             reportData: result.rows
         });
     } catch (error) {
