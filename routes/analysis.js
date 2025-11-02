@@ -893,17 +893,21 @@ router.get('/operating-expenses', async (req, res) => {
     }
 });
 
-// GET /api/analysis/staff-performance - Analyze staff performance
+// GET /api/analysis/staff-performance - Analyze staff performance with CORRECT profit calculation
 router.get('/staff-performance', async (req, res) => {
     const { startDate, endDate, role, limit = 10 } = req.query;
     
     let query = `
         SELECT 
+            u.id AS user_id,
             u.fullname AS staff_name,
             u.role,
             COUNT(st.id) AS total_transactions,
             COALESCE(SUM(st.total_amount), 0) AS total_sales,
-            COALESCE(SUM(st.total_profit), 0) AS total_profit,
+            COALESCE(SUM(st.total_cogs), 0) AS total_cogs,
+            -- Calculate profit correctly as (sales - COGS)
+            COALESCE(SUM(st.total_amount - st.total_cogs), 0) AS total_profit,
+            COALESCE(SUM(st.total_profit), 0) AS stored_profit_incorrect,
             AVG(st.total_amount) AS avg_transaction_value,
             COALESCE(SUM(st.discount_amount), 0) AS total_discounts_given
         FROM users u
@@ -929,9 +933,35 @@ router.get('/staff-performance', async (req, res) => {
 
     try {
         const result = await db.query(query, params);
+        
+        // Log profit correction for debugging
+        result.rows.forEach(staff => {
+            if (parseFloat(staff.total_profit) !== parseFloat(staff.stored_profit_incorrect)) {
+                console.log('Staff Profit Correction:', {
+                    staff: staff.staff_name,
+                    correct_profit: staff.total_profit,
+                    incorrect_stored_profit: staff.stored_profit_incorrect,
+                    discrepancy: staff.total_profit - staff.stored_profit_incorrect
+                });
+            }
+        });
+
+        const performanceData = result.rows.map(staff => ({
+            staff_name: staff.staff_name,
+            role: staff.role,
+            total_transactions: parseInt(staff.total_transactions),
+            total_sales: parseFloat(staff.total_sales),
+            total_profit: parseFloat(staff.total_profit), // Using CORRECT profit
+            total_cogs: parseFloat(staff.total_cogs),
+            avg_transaction_value: parseFloat(staff.avg_transaction_value),
+            total_discounts_given: parseFloat(staff.total_discounts_given),
+            profit_margin_percentage: staff.total_sales > 0 ? (staff.total_profit / staff.total_sales * 100) : 0
+        }));
+
         res.status(200).json({
             filtersUsed: { startDate, endDate, role, limit },
-            reportData: result.rows
+            reportData: performanceData,
+            data_note: 'Profit calculated as (Sales - COGS) to correct database inconsistency'
         });
     } catch (error) {
         console.error('Error fetching staff performance analysis:', error);
@@ -939,7 +969,7 @@ router.get('/staff-performance', async (req, res) => {
     }
 });
 
-// GET /api/analysis/branch-performance - Compare branch performance
+// GET /api/analysis/branch-performance - Compare branch performance with CORRECT profit
 router.get('/branch-performance', async (req, res) => {
     const { startDate, endDate, metric = 'sales', limit = 10 } = req.query;
     
@@ -949,7 +979,8 @@ router.get('/branch-performance', async (req, res) => {
             selectField = 'COALESCE(SUM(st.total_amount), 0)';
             break;
         case 'profit':
-            selectField = 'COALESCE(SUM(st.total_profit), 0)';
+            // Use CORRECT profit calculation
+            selectField = 'COALESCE(SUM(st.total_amount - st.total_cogs), 0)';
             break;
         case 'customers':
             selectField = 'COUNT(DISTINCT st.customer_id)';
@@ -963,11 +994,15 @@ router.get('/branch-performance', async (req, res) => {
 
     let query = `
         SELECT 
+            b.id AS branch_id,
             b.name AS branch_name,
             ${selectField} AS performance_metric,
             COUNT(st.id) AS total_transactions,
             COALESCE(SUM(st.total_amount), 0) AS total_sales,
-            COALESCE(SUM(st.total_profit), 0) AS total_profit,
+            COALESCE(SUM(st.total_cogs), 0) AS total_cogs,
+            -- Calculate profit correctly
+            COALESCE(SUM(st.total_amount - st.total_cogs), 0) AS total_profit,
+            COALESCE(SUM(st.total_profit), 0) AS stored_profit_incorrect,
             COUNT(DISTINCT st.customer_id) AS unique_customers,
             AVG(st.total_amount) AS avg_transaction_value
         FROM branches b
@@ -988,9 +1023,35 @@ router.get('/branch-performance', async (req, res) => {
 
     try {
         const result = await db.query(query, params);
+        
+        // Log any profit discrepancies
+        result.rows.forEach(branch => {
+            if (parseFloat(branch.total_profit) !== parseFloat(branch.stored_profit_incorrect)) {
+                console.log('Branch Profit Correction:', {
+                    branch: branch.branch_name,
+                    correct_profit: branch.total_profit,
+                    incorrect_stored_profit: branch.stored_profit_incorrect,
+                    discrepancy: branch.total_profit - branch.stored_profit_incorrect
+                });
+            }
+        });
+
+        const branchData = result.rows.map(branch => ({
+            branch_id: branch.branch_id,
+            branch_name: branch.branch_name,
+            performance_metric: parseFloat(branch.performance_metric),
+            total_transactions: parseInt(branch.total_transactions),
+            total_sales: parseFloat(branch.total_sales),
+            total_profit: parseFloat(branch.total_profit), // CORRECT profit
+            unique_customers: parseInt(branch.unique_customers),
+            avg_transaction_value: parseFloat(branch.avg_transaction_value),
+            profit_margin_percentage: branch.total_sales > 0 ? (branch.total_profit / branch.total_sales * 100) : 0
+        }));
+
         res.status(200).json({
             filtersUsed: { startDate, endDate, metric, limit },
-            reportData: result.rows
+            reportData: branchData,
+            data_note: metric === 'profit' ? 'Profit calculated as (Sales - COGS)' : 'All metrics use corrected calculations'
         });
     } catch (error) {
         console.error('Error fetching branch performance analysis:', error);
