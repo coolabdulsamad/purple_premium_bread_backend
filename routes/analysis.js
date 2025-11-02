@@ -712,7 +712,7 @@ router.get('/discounts', async (req, res) => {
     }
 });
 
-// GET /api/analysis/operating-expenses - Operating expenses analysis
+// GET /api/analysis/operating-expenses - Operating expenses analysis (FIXED)
 router.get('/operating-expenses', async (req, res) => {
     const { startDate, endDate, category, expenseType, period = 'month' } = req.query;
     
@@ -720,15 +720,16 @@ router.get('/operating-expenses', async (req, res) => {
         let query = `
             SELECT 
                 category,
-                expense_type,
+                COALESCE(expense_type, 'Not Specified') as expense_type,
                 SUM(amount) as total_amount,
                 COUNT(*) as transaction_count,
                 AVG(amount) as average_amount,
                 (SUM(amount) / 
-                    GREATEST(
-                        EXTRACT(EPOCH FROM (MAX(expense_date) - MIN(expense_date))) / 2592000,
-                        1
-                    )
+                    CASE 
+                        WHEN EXTRACT(EPOCH FROM (MAX(expense_date) - MIN(expense_date))) > 0 
+                        THEN EXTRACT(EPOCH FROM (MAX(expense_date) - MIN(expense_date))) / 2592000 
+                        ELSE 1 
+                    END
                 ) as average_monthly
             FROM operating_expenses
             WHERE status = 'active'
@@ -748,7 +749,7 @@ router.get('/operating-expenses', async (req, res) => {
             query += ` AND category = $${paramIndex++}`;
             params.push(category);
         }
-        if (expenseType) {
+        if (expenseType && expenseType !== '') {
             query += ` AND expense_type = $${paramIndex++}`;
             params.push(expenseType);
         }
@@ -767,7 +768,7 @@ router.get('/operating-expenses', async (req, res) => {
     }
 });
 
-// GET /api/analysis/salaries - Salary analysis
+// GET /api/analysis/salaries - Salary analysis (FIXED)
 router.get('/salaries', async (req, res) => {
     const { startDate, endDate, userId, status, period = 'month' } = req.query;
     
@@ -777,22 +778,18 @@ router.get('/salaries', async (req, res) => {
                 sp.*,
                 u.fullname as staff_name,
                 u.role as staff_role,
-                COALESCE(sc_allow.allowances, 0) as allowances,
-                COALESCE(sc_ded.deductions, 0) as deductions
+                COALESCE((
+                    SELECT SUM(amount) 
+                    FROM salary_components 
+                    WHERE salary_payment_id = sp.id AND component_type = 'allowance'
+                ), 0) as allowances,
+                COALESCE((
+                    SELECT SUM(amount) 
+                    FROM salary_components 
+                    WHERE salary_payment_id = sp.id AND component_type = 'deduction'
+                ), 0) as deductions
             FROM salary_payments sp
             JOIN users u ON sp.user_id = u.id
-            LEFT JOIN (
-                SELECT salary_payment_id, SUM(amount) as allowances
-                FROM salary_components 
-                WHERE component_type = 'allowance'
-                GROUP BY salary_payment_id
-            ) sc_allow ON sp.id = sc_allow.salary_payment_id
-            LEFT JOIN (
-                SELECT salary_payment_id, SUM(amount) as deductions
-                FROM salary_components 
-                WHERE component_type = 'deduction'
-                GROUP BY salary_payment_id
-            ) sc_ded ON sp.id = sc_ded.salary_payment_id
             WHERE 1=1
         `;
         let params = [];
@@ -829,7 +826,63 @@ router.get('/salaries', async (req, res) => {
     }
 });
 
-// GET /api/analysis/stock-issues - Stock issue analysis
+// GET /api/analysis/free-stock - Free stock distribution analysis (FIXED)
+router.get('/free-stock', async (req, res) => {
+    const { startDate, endDate, productId, branchId } = req.query;
+    
+    try {
+        let query = `
+            SELECT 
+                p.id as product_id,
+                p.name as product_name,
+                SUM(fsl.quantity) as total_quantity,
+                COUNT(fsl.id) as total_occurrences,
+                (
+                    SELECT fsl2.reason 
+                    FROM free_stock_log fsl2 
+                    WHERE fsl2.product_id = p.id 
+                    GROUP BY fsl2.reason 
+                    ORDER BY COUNT(*) DESC 
+                    LIMIT 1
+                ) as most_common_reason
+            FROM free_stock_log fsl
+            JOIN products p ON fsl.product_id = p.id
+            WHERE 1=1
+        `;
+        let params = [];
+        let paramIndex = 1;
+
+        // Apply date filters
+        if (startDate) {
+            query += ` AND fsl.recorded_at >= $${paramIndex++}`;
+            params.push(startDate);
+        }
+        if (endDate) {
+            const endOfDay = new Date(endDate);
+            endOfDay.setDate(endOfDay.getDate() + 1);
+            query += ` AND fsl.recorded_at < $${paramIndex++}`;
+            params.push(endOfDay.toISOString());
+        }
+        if (productId) {
+            query += ` AND fsl.product_id = $${paramIndex++}`;
+            params.push(parseInt(productId));
+        }
+
+        query += ` GROUP BY p.id, p.name ORDER BY total_quantity DESC`;
+
+        const result = await db.query(query, params);
+        
+        res.status(200).json({
+            filtersUsed: { startDate, endDate, productId, branchId },
+            reportData: result.rows
+        });
+    } catch (error) {
+        console.error('Error fetching free stock analysis:', error);
+        res.status(500).json({ error: 'Failed to fetch free stock analysis.', details: error.message });
+    }
+});
+
+// GET /api/analysis/stock-issues - Stock issue analysis (FIXED)
 router.get('/stock-issues', async (req, res) => {
     const { startDate, endDate, issueType, productId, branchId, period = 'month' } = req.query;
     
@@ -840,11 +893,11 @@ router.get('/stock-issues', async (req, res) => {
                 SUM(sil.quantity_changed) as total_quantity,
                 COUNT(sil.id) as transaction_count,
                 (
-                    SELECT p.name 
+                    SELECT p2.name 
                     FROM stock_issue_log sil2 
-                    JOIN products p ON sil2.product_id = p.id 
+                    JOIN products p2 ON sil2.product_id = p2.id 
                     WHERE sil2.issue_type = sil.issue_type 
-                    GROUP BY p.name 
+                    GROUP BY p2.name 
                     ORDER BY SUM(sil2.quantity_changed) DESC 
                     LIMIT 1
                 ) as most_affected_product
@@ -888,7 +941,7 @@ router.get('/stock-issues', async (req, res) => {
     }
 });
 
-// GET /api/analysis/waste-stock - Waste stock analysis
+// GET /api/analysis/waste-stock - Waste stock analysis (FIXED)
 router.get('/waste-stock', async (req, res) => {
     const { startDate, endDate, productId, reason, branchId, period = 'month' } = req.query;
     
@@ -899,11 +952,11 @@ router.get('/waste-stock', async (req, res) => {
                 p.name as product_name,
                 SUM(ws.quantity) as total_quantity,
                 (
-                    SELECT reason 
-                    FROM waste_stock 
-                    WHERE product_id = ws.product_id 
-                    GROUP BY reason 
-                    ORDER BY SUM(quantity) DESC 
+                    SELECT ws2.reason 
+                    FROM waste_stock ws2 
+                    WHERE ws2.product_id = ws.product_id 
+                    GROUP BY ws2.reason 
+                    ORDER BY SUM(ws2.quantity) DESC 
                     LIMIT 1
                 ) as primary_reason,
                 COUNT(ws.id) as occurrence_count,
@@ -929,7 +982,7 @@ router.get('/waste-stock', async (req, res) => {
             query += ` AND ws.product_id = $${paramIndex++}`;
             params.push(parseInt(productId));
         }
-        if (reason) {
+        if (reason && reason !== '') {
             query += ` AND ws.reason = $${paramIndex++}`;
             params.push(reason);
         }
