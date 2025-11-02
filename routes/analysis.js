@@ -1063,8 +1063,12 @@ router.get('/sales-summary', async (req, res) => {
     let query = `
         SELECT 
             COALESCE(SUM(total_amount), 0) AS total_sales,
-            COALESCE(SUM(total_profit), 0) AS total_profit,
-            COUNT(*) AS total_transactions
+            COALESCE(SUM(total_cogs), 0) AS total_cogs,
+            -- ALWAYS calculate profit as (sales - COGS) since stored profit is incorrect
+            COALESCE(SUM(total_amount - total_cogs), 0) AS total_profit,
+            COUNT(*) AS total_transactions,
+            -- Also return the incorrect stored profit for reference
+            COALESCE(SUM(total_profit), 0) AS stored_profit_incorrect
         FROM sales_transactions 
         WHERE status != 'Cancelled'
     `;
@@ -1080,9 +1084,24 @@ router.get('/sales-summary', async (req, res) => {
 
     try {
         const result = await db.query(query, params);
+        const data = result.rows[0];
+        
+        console.log('PROFIT FIX APPLIED - Corrected profit calculation:', {
+            total_sales: data.total_sales,
+            total_cogs: data.total_cogs,
+            correct_profit: data.total_profit,
+            incorrect_stored_profit: data.stored_profit_incorrect,
+            discrepancy: data.stored_profit_incorrect - data.total_profit
+        });
+
         res.status(200).json({
             filtersUsed: { startDate, endDate, branchId },
-            reportData: result.rows[0]
+            reportData: {
+                total_sales: parseFloat(data.total_sales),
+                total_profit: parseFloat(data.total_profit), // This is the CORRECT profit
+                total_transactions: parseInt(data.total_transactions),
+                data_quality_note: 'Profit calculated as (Sales - COGS) to correct database inconsistency'
+            }
         });
     } catch (error) {
         console.error('Error fetching sales summary:', error);
