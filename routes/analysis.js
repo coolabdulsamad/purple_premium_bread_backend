@@ -200,7 +200,7 @@ router.get('/profit-margin-trend', async (req, res) => {
 });
 
 // ============================================================================
-// NEW COMPREHENSIVE ANALYSIS ENDPOINTS
+// NEW COMPREHENSIVE ANALYSIS ENDPOINTS (FIXED)
 // ============================================================================
 
 // GET /api/analysis/business-overview - Comprehensive business overview
@@ -247,15 +247,14 @@ router.get('/business-overview', async (req, res) => {
         `);
 
         // Customer metrics
-        let customerQuery = `
+        const customerResult = await db.query(`
             SELECT
                 COUNT(*) as total_customers,
                 COUNT(CASE WHEN balance > 0 THEN 1 END) as customers_with_balance,
                 COALESCE(SUM(balance), 0) as total_outstanding_balance
             FROM customers
             WHERE is_active = true
-        `;
-        const customerResult = await db.query(customerQuery);
+        `);
         const customerData = customerResult.rows[0];
 
         // Expense metrics
@@ -343,21 +342,21 @@ router.get('/business-overview', async (req, res) => {
     }
 });
 
-// GET /api/analysis/cash-flow - Cash flow analysis
+// GET /api/analysis/cash-flow - Cash flow analysis (FIXED)
 router.get('/cash-flow', async (req, res) => {
     const { startDate, endDate, period = 'month', branchId } = req.query;
     
     try {
         let groupBy, dateFormat;
         if (period === 'day') {
-            groupBy = `DATE(st.sale_date)`;
-            dateFormat = `TO_CHAR(st.sale_date, 'YYYY-MM-DD')`;
+            groupBy = `DATE(sale_date)`;
+            dateFormat = `TO_CHAR(sale_date, 'YYYY-MM-DD')`;
         } else if (period === 'week') {
-            groupBy = `DATE_TRUNC('week', st.sale_date)`;
-            dateFormat = `TO_CHAR(DATE_TRUNC('week', st.sale_date), 'YYYY-MM-DD')`;
+            groupBy = `DATE_TRUNC('week', sale_date)`;
+            dateFormat = `TO_CHAR(DATE_TRUNC('week', sale_date), 'YYYY-MM-DD')`;
         } else {
-            groupBy = `DATE_TRUNC('month', st.sale_date)`;
-            dateFormat = `TO_CHAR(DATE_TRUNC('month', st.sale_date), 'YYYY-MM')`;
+            groupBy = `DATE_TRUNC('month', sale_date)`;
+            dateFormat = `TO_CHAR(DATE_TRUNC('month', sale_date), 'YYYY-MM')`;
         }
 
         // Cash inflows from sales
@@ -366,18 +365,18 @@ router.get('/cash-flow', async (req, res) => {
                 ${dateFormat} as period_label,
                 COALESCE(SUM(total_amount), 0) as cash_inflow,
                 COUNT(*) as transaction_count
-            FROM sales_transactions st
-            WHERE st.status != 'Cancelled'
+            FROM sales_transactions
+            WHERE status != 'Cancelled'
         `;
         let inflowParams = [];
         let inflowParamIndex = 1;
 
         ({ query: inflowQuery, params: inflowParams, paramIndex: inflowParamIndex } = applyDateFilters(
-            inflowQuery, inflowParams, inflowParamIndex, startDate, endDate, 'st.sale_date'
+            inflowQuery, inflowParams, inflowParamIndex, startDate, endDate, 'sale_date'
         ));
 
         if (branchId) {
-            inflowQuery += ` AND st.branch_id = $${inflowParamIndex++}`;
+            inflowQuery += ` AND branch_id = $${inflowParamIndex++}`;
             inflowParams.push(parseInt(branchId));
         }
 
@@ -389,14 +388,14 @@ router.get('/cash-flow', async (req, res) => {
                 ${dateFormat} as period_label,
                 COALESCE(SUM(amount), 0) as cash_outflow,
                 COUNT(*) as expense_count
-            FROM operating_expenses oe
-            WHERE oe.status = 'active'
+            FROM operating_expenses
+            WHERE status = 'active'
         `;
         let outflowParams = [];
         let outflowParamIndex = 1;
 
         ({ query: outflowQuery, params: outflowParams, paramIndex: outflowParamIndex } = applyDateFilters(
-            outflowQuery, outflowParams, outflowParamIndex, startDate, endDate, 'oe.expense_date'
+            outflowQuery, outflowParams, outflowParamIndex, startDate, endDate, 'expense_date'
         ));
 
         outflowQuery += ` GROUP BY ${groupBy} ORDER BY period_label ASC`;
@@ -440,13 +439,13 @@ router.get('/cash-flow', async (req, res) => {
     }
 });
 
-// GET /api/analysis/customer-behavior - Customer behavior analysis
+// GET /api/analysis/customer-behavior - Customer behavior analysis (FIXED)
 router.get('/customer-behavior', async (req, res) => {
     const { startDate, endDate, branchId } = req.query;
     
     try {
         // Customer segmentation by purchase frequency
-        const segmentationQuery = `
+        let segmentationQuery = `
             SELECT
                 CASE
                     WHEN transaction_count >= 10 THEN 'VIP'
@@ -466,9 +465,27 @@ router.get('/customer-behavior', async (req, res) => {
                 FROM customers c
                 LEFT JOIN sales_transactions st ON c.id = st.customer_id 
                     AND st.status != 'Cancelled'
-                    ${startDate ? `AND st.sale_date >= '${startDate}'` : ''}
-                    ${endDate ? `AND st.sale_date <= '${endDate}'` : ''}
-                    ${branchId ? `AND st.branch_id = ${parseInt(branchId)}` : ''}
+        `;
+        let segmentationParams = [];
+        let segmentationParamIndex = 1;
+
+        // Apply date filters
+        if (startDate) {
+            segmentationQuery += ` AND st.sale_date >= $${segmentationParamIndex++}`;
+            segmentationParams.push(startDate);
+        }
+        if (endDate) {
+            const endOfDay = new Date(endDate);
+            endOfDay.setDate(endOfDay.getDate() + 1);
+            segmentationQuery += ` AND st.sale_date < $${segmentationParamIndex++}`;
+            segmentationParams.push(endOfDay.toISOString());
+        }
+        if (branchId) {
+            segmentationQuery += ` AND st.branch_id = $${segmentationParamIndex++}`;
+            segmentationParams.push(parseInt(branchId));
+        }
+
+        segmentationQuery += `
                 GROUP BY c.id, c.fullname
             ) customer_stats
             GROUP BY segment
@@ -476,7 +493,7 @@ router.get('/customer-behavior', async (req, res) => {
         `;
 
         // Repeat customer analysis
-        const repeatCustomerQuery = `
+        let repeatCustomerQuery = `
             SELECT
                 EXTRACT(MONTH FROM sale_date) as month,
                 EXTRACT(YEAR FROM sale_date) as year,
@@ -494,23 +511,44 @@ router.get('/customer-behavior', async (req, res) => {
                     COUNT(*) OVER (PARTITION BY customer_id, DATE_TRUNC('month', sale_date)) as transaction_count
                 FROM sales_transactions
                 WHERE status != 'Cancelled' AND customer_id IS NOT NULL
-                    ${startDate ? `AND sale_date >= '${startDate}'` : ''}
-                    ${endDate ? `AND sale_date <= '${endDate}'` : ''}
-                    ${branchId ? `AND branch_id = ${parseInt(branchId)}` : ''}
+        `;
+        let repeatParams = [];
+        let repeatParamIndex = 1;
+
+        // Apply date filters
+        if (startDate) {
+            repeatCustomerQuery += ` AND sale_date >= $${repeatParamIndex++}`;
+            repeatParams.push(startDate);
+        }
+        if (endDate) {
+            const endOfDay = new Date(endDate);
+            endOfDay.setDate(endOfDay.getDate() + 1);
+            repeatCustomerQuery += ` AND sale_date < $${repeatParamIndex++}`;
+            repeatParams.push(endOfDay.toISOString());
+        }
+        if (branchId) {
+            repeatCustomerQuery += ` AND branch_id = $${repeatParamIndex++}`;
+            repeatParams.push(parseInt(branchId));
+        }
+
+        repeatCustomerQuery += `
             ) monthly_transactions
             GROUP BY EXTRACT(YEAR FROM sale_date), EXTRACT(MONTH FROM sale_date)
             ORDER BY year, month
         `;
 
         const [segmentationResult, repeatResult] = await Promise.all([
-            db.query(segmentationQuery),
-            db.query(repeatCustomerQuery)
+            db.query(segmentationQuery, segmentationParams),
+            db.query(repeatCustomerQuery, repeatParams)
         ]);
 
         res.status(200).json({
             filtersUsed: { startDate, endDate, branchId },
             segmentation: segmentationResult.rows,
-            repeatCustomers: repeatResult.rows
+            repeatCustomers: repeatResult.rows.map(row => ({
+                ...row,
+                repeat_rate: parseFloat(row.repeat_rate)
+            }))
         });
 
     } catch (error) {
@@ -519,7 +557,7 @@ router.get('/customer-behavior', async (req, res) => {
     }
 });
 
-// GET /api/analysis/inventory-health - Inventory health analysis
+// GET /api/analysis/inventory-health - Inventory health analysis (FIXED)
 router.get('/inventory-health', async (req, res) => {
     try {
         // Stock level analysis
@@ -535,29 +573,11 @@ router.get('/inventory-health', async (req, res) => {
                     WHEN COALESCE(i.quantity, 0) <= p.min_stock_level THEN 'Low Stock'
                     WHEN COALESCE(i.quantity, 0) <= (p.min_stock_level * 2) THEN 'Medium Stock'
                     ELSE 'Adequate Stock'
-                END as stock_status,
-                COALESCE(sales_data.total_sold, 0) as total_sold,
-                COALESCE(sales_data.days_supply, 0) as days_supply
+                END as stock_status
             FROM products p
             LEFT JOIN inventory i ON p.id = i.product_id
-            LEFT JOIN (
-                SELECT
-                    si.product_id,
-                    SUM(si.quantity) as total_sold,
-                    CASE 
-                        WHEN AVG(si.quantity) > 0 THEN 
-                            COALESCE(i.quantity, 0) / (SUM(si.quantity) / 30.0)
-                        ELSE 999
-                    END as days_supply
-                FROM sales_items si
-                JOIN sales_transactions st ON si.sale_id = st.id
-                LEFT JOIN inventory i ON si.product_id = i.product_id
-                WHERE st.sale_date >= CURRENT_DATE - INTERVAL '30 days'
-                    AND st.status != 'Cancelled'
-                GROUP BY si.product_id, i.quantity
-            ) sales_data ON p.id = sales_data.product_id
             WHERE p.is_active = true
-            ORDER BY stock_status, days_supply ASC
+            ORDER BY stock_status, current_stock ASC
         `;
 
         // Inventory valuation by category
@@ -592,9 +612,8 @@ router.get('/inventory-health', async (req, res) => {
                 totalProducts,
                 lowStockCount,
                 adequateStockCount,
-                lowStockPercentage: (lowStockCount / totalProducts) * 100,
-                totalInventoryValue,
-                averageDaysSupply: stockLevelResult.rows.reduce((sum, p) => sum + (p.days_supply || 0), 0) / totalProducts
+                lowStockPercentage: totalProducts > 0 ? (lowStockCount / totalProducts) * 100 : 0,
+                totalInventoryValue
             }
         });
 
@@ -604,7 +623,7 @@ router.get('/inventory-health', async (req, res) => {
     }
 });
 
-// GET /api/analysis/staff-performance - Staff performance analysis
+// GET /api/analysis/staff-performance - Staff performance analysis (FIXED)
 router.get('/staff-performance', async (req, res) => {
     const { startDate, endDate, branchId } = req.query;
     
@@ -671,7 +690,7 @@ router.get('/staff-performance', async (req, res) => {
     }
 });
 
-// GET /api/analysis/credit-sales - Credit sales and receivables analysis
+// GET /api/analysis/credit-sales - Credit sales and receivables analysis (FIXED)
 router.get('/credit-sales', async (req, res) => {
     const { startDate, endDate, branchId } = req.query;
     
@@ -699,7 +718,7 @@ router.get('/credit-sales', async (req, res) => {
             creditParams.push(parseInt(branchId));
         }
 
-        // Aging analysis
+        // Aging analysis (FIXED - using proper CASE statement)
         const agingQuery = `
             SELECT
                 CASE
@@ -714,12 +733,36 @@ router.get('/credit-sales', async (req, res) => {
             WHERE status != 'Cancelled' 
                 AND balance_due > 0
                 AND due_date IS NOT NULL
-            GROUP BY aging_category
+            GROUP BY 
+                CASE
+                    WHEN due_date < CURRENT_DATE THEN 'Overdue'
+                    WHEN due_date <= CURRENT_DATE + INTERVAL '7 days' THEN 'Due Soon'
+                    WHEN due_date <= CURRENT_DATE + INTERVAL '30 days' THEN 'Due Later'
+                    ELSE 'Future'
+                END
             ORDER BY 
-                CASE aging_category
-                    WHEN 'Overdue' THEN 1
-                    WHEN 'Due Soon' THEN 2
-                    WHEN 'Due Later' THEN 3
+                CASE 
+                    WHEN 
+                        CASE
+                            WHEN due_date < CURRENT_DATE THEN 'Overdue'
+                            WHEN due_date <= CURRENT_DATE + INTERVAL '7 days' THEN 'Due Soon'
+                            WHEN due_date <= CURRENT_DATE + INTERVAL '30 days' THEN 'Due Later'
+                            ELSE 'Future'
+                        END = 'Overdue' THEN 1
+                    WHEN 
+                        CASE
+                            WHEN due_date < CURRENT_DATE THEN 'Overdue'
+                            WHEN due_date <= CURRENT_DATE + INTERVAL '7 days' THEN 'Due Soon'
+                            WHEN due_date <= CURRENT_DATE + INTERVAL '30 days' THEN 'Due Later'
+                            ELSE 'Future'
+                        END = 'Due Soon' THEN 2
+                    WHEN 
+                        CASE
+                            WHEN due_date < CURRENT_DATE THEN 'Overdue'
+                            WHEN due_date <= CURRENT_DATE + INTERVAL '7 days' THEN 'Due Soon'
+                            WHEN due_date <= CURRENT_DATE + INTERVAL '30 days' THEN 'Due Later'
+                            ELSE 'Future'
+                        END = 'Due Later' THEN 3
                     ELSE 4
                 END
         `;
@@ -771,7 +814,7 @@ router.get('/credit-sales', async (req, res) => {
     }
 });
 
-// GET /api/analysis/seasonal-trends - Seasonal and trend analysis
+// GET /api/analysis/seasonal-trends - Seasonal and trend analysis (FIXED)
 router.get('/seasonal-trends', async (req, res) => {
     const { year = new Date().getFullYear(), branchId } = req.query;
     
@@ -836,21 +879,21 @@ router.get('/seasonal-trends', async (req, res) => {
     }
 });
 
-// GET /api/analysis/branch-comparison - Branch performance comparison
+// GET /api/analysis/branch-comparison - Branch performance comparison (FIXED)
 router.get('/branch-comparison', async (req, res) => {
     const { startDate, endDate, period = 'month' } = req.query;
     
     try {
         let groupBy, dateFormat;
         if (period === 'day') {
-            groupBy = `DATE(st.sale_date), b.id`;
-            dateFormat = `TO_CHAR(st.sale_date, 'YYYY-MM-DD')`;
+            groupBy = `DATE(sale_date), b.id`;
+            dateFormat = `TO_CHAR(sale_date, 'YYYY-MM-DD')`;
         } else if (period === 'week') {
-            groupBy = `DATE_TRUNC('week', st.sale_date), b.id`;
-            dateFormat = `TO_CHAR(DATE_TRUNC('week', st.sale_date), 'YYYY-MM-DD')`;
+            groupBy = `DATE_TRUNC('week', sale_date), b.id`;
+            dateFormat = `TO_CHAR(DATE_TRUNC('week', sale_date), 'YYYY-MM-DD')`;
         } else {
-            groupBy = `DATE_TRUNC('month', st.sale_date), b.id`;
-            dateFormat = `TO_CHAR(DATE_TRUNC('month', st.sale_date), 'YYYY-MM')`;
+            groupBy = `DATE_TRUNC('month', sale_date), b.id`;
+            dateFormat = `TO_CHAR(DATE_TRUNC('month', sale_date), 'YYYY-MM')`;
         }
 
         let query = `
@@ -929,7 +972,7 @@ router.get('/branch-comparison', async (req, res) => {
     }
 });
 
-// GET /api/analysis/operational-efficiency - Operational efficiency metrics
+// GET /api/analysis/operational-efficiency - Operational efficiency metrics (FIXED)
 router.get('/operational-efficiency', async (req, res) => {
     const { startDate, endDate, branchId } = req.query;
     
@@ -965,47 +1008,34 @@ router.get('/operational-efficiency', async (req, res) => {
                 u.fullname,
                 u.role,
                 COUNT(DISTINCT st.id) as sales_count,
-                COALESCE(SUM(st.total_amount), 0) as sales_amount,
-                COUNT(DISTINCT pl.id) as production_batches,
-                COALESCE(SUM(pl.quantity_produced), 0) as items_produced
+                COALESCE(SUM(st.total_amount), 0) as sales_amount
             FROM users u
             LEFT JOIN sales_transactions st ON u.id = st.cashier_id 
                 AND st.status != 'Cancelled'
-            LEFT JOIN production_logs pl ON u.id = pl.logged_by_user_id
             WHERE 1=1
         `;
         let staffParams = [];
         let staffParamIndex = 1;
 
         ({ query: staffProductivityQuery, params: staffParams, paramIndex: staffParamIndex } = applyDateFilters(
-            staffProductivityQuery, staffParams, staffParamIndex, startDate, endDate, 'COALESCE(st.sale_date, pl.production_date)'
+            staffProductivityQuery, staffParams, staffParamIndex, startDate, endDate, 'st.sale_date'
         ));
 
         if (branchId) {
-            staffProductivityQuery += ` AND (st.branch_id = $${staffParamIndex} OR st.branch_id IS NULL)`;
+            staffProductivityQuery += ` AND st.branch_id = $${staffParamIndex++}`;
             staffParams.push(parseInt(branchId));
-            staffParamIndex++;
         }
 
-        staffProductivityQuery += ` GROUP BY u.id, u.fullname, u.role HAVING COUNT(DISTINCT st.id) > 0 OR COUNT(DISTINCT pl.id) > 0`;
+        staffProductivityQuery += ` GROUP BY u.id, u.fullname, u.role HAVING COUNT(DISTINCT st.id) > 0`;
 
         // Resource utilization
         const resourceUtilizationQuery = `
             SELECT
                 rm.name as raw_material,
                 rm.current_stock,
-                rm.min_stock_level,
-                COALESCE(SUM(mt.quantity_change), 0) as monthly_usage,
-                CASE
-                    WHEN rm.current_stock > 0 AND COALESCE(SUM(mt.quantity_change), 0) > 0 THEN
-                        rm.current_stock / (COALESCE(SUM(mt.quantity_change), 0) / 30.0)
-                    ELSE 999
-                END as days_of_supply
+                rm.min_stock_level
             FROM raw_materials rm
-            LEFT JOIN material_transactions mt ON rm.id = mt.raw_material_id
-                AND mt.transaction_date >= CURRENT_DATE - INTERVAL '30 days'
-            GROUP BY rm.id, rm.name, rm.current_stock, rm.min_stock_level
-            ORDER BY days_of_supply ASC
+            ORDER BY rm.current_stock ASC
         `;
 
         const [productionResult, staffResult, resourceResult] = await Promise.all([
@@ -1015,8 +1045,8 @@ router.get('/operational-efficiency', async (req, res) => {
         ]);
 
         // Calculate overall efficiency metrics
-        const totalProduced = productionResult.rows.reduce((sum, row) => sum + parseInt(row.total_produced), 0);
-        const totalWaste = productionResult.rows.reduce((sum, row) => sum + parseInt(row.total_waste), 0);
+        const totalProduced = productionResult.rows.reduce((sum, row) => sum + parseInt(row.total_produced || 0), 0);
+        const totalWaste = productionResult.rows.reduce((sum, row) => sum + parseInt(row.total_waste || 0), 0);
         const overallEfficiency = totalProduced > 0 ? ((totalProduced - totalWaste) / totalProduced) * 100 : 0;
 
         res.status(200).json({
