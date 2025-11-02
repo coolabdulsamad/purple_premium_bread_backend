@@ -1054,4 +1054,92 @@ router.get('/waste-analysis', async (req, res) => {
     }
 });
 
+// Add these new endpoints to your existing analysis.js file
+
+// GET /api/analysis/sales-summary - Get total sales, profit, and transactions for period
+router.get('/sales-summary', async (req, res) => {
+    const { startDate, endDate, branchId } = req.query;
+    
+    let query = `
+        SELECT 
+            COALESCE(SUM(total_amount), 0) AS total_sales,
+            COALESCE(SUM(total_profit), 0) AS total_profit,
+            COUNT(*) AS total_transactions
+        FROM sales_transactions 
+        WHERE status != 'Cancelled'
+    `;
+    let params = [];
+    let paramIndex = 1;
+
+    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'sale_date'));
+
+    if (branchId) {
+        query += ` AND branch_id = $${paramIndex++}`;
+        params.push(parseInt(branchId));
+    }
+
+    try {
+        const result = await db.query(query, params);
+        res.status(200).json({
+            filtersUsed: { startDate, endDate, branchId },
+            reportData: result.rows[0]
+        });
+    } catch (error) {
+        console.error('Error fetching sales summary:', error);
+        res.status(500).json({ error: 'Failed to fetch sales summary.', details: error.message });
+    }
+});
+
+// GET /api/analysis/customer-count - Count unique customers in period
+router.get('/customer-count', async (req, res) => {
+    const { startDate, endDate, branchId } = req.query;
+    
+    let query = `
+        SELECT 
+            COUNT(DISTINCT customer_id) AS total_customers
+        FROM sales_transactions 
+        WHERE status != 'Cancelled' AND customer_id IS NOT NULL
+    `;
+    let params = [];
+    let paramIndex = 1;
+
+    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'sale_date'));
+
+    if (branchId) {
+        query += ` AND branch_id = $${paramIndex++}`;
+        params.push(parseInt(branchId));
+    }
+
+    try {
+        const result = await db.query(query, params);
+        res.status(200).json({
+            filtersUsed: { startDate, endDate, branchId },
+            reportData: result.rows[0]
+        });
+    } catch (error) {
+        console.error('Error fetching customer count:', error);
+        res.status(500).json({ error: 'Failed to fetch customer count.', details: error.message });
+    }
+});
+
+// GET /api/analysis/inventory-value - Get current inventory value
+router.get('/inventory-value', async (req, res) => {
+    try {
+        const query = `
+            SELECT 
+                COALESCE(SUM(i.quantity * p.price), 0) AS total_value
+            FROM inventory i
+            JOIN products p ON i.product_id = p.id
+        `;
+        
+        const result = await db.query(query);
+        res.status(200).json({
+            reportData: result.rows[0]
+        });
+    } catch (error) {
+        console.error('Error fetching inventory value:', error);
+        res.status(500).json({ error: 'Failed to fetch inventory value.', details: error.message });
+    }
+});
+
 module.exports = router;
