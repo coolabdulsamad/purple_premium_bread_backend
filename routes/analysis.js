@@ -80,10 +80,12 @@ router.get('/sales-comparison', async (req, res) => {
     }
 
     try {
+        // Updated queries to calculate profit correctly as (sales - COGS)
         const currentPeriodData = await db.query(
             `SELECT
                 COALESCE(SUM(total_amount), 0) AS total_sales,
-                COALESCE(SUM(total_profit), 0) AS total_profit
+                COALESCE(SUM(total_cogs), 0) AS total_cogs,
+                COALESCE(SUM(total_amount - total_cogs), 0) AS total_profit
             FROM sales_transactions
             WHERE sale_date >= $1 AND sale_date <= $2 AND status != 'Cancelled' ${branchFilter};`,
             currentQueryParams
@@ -92,11 +94,23 @@ router.get('/sales-comparison', async (req, res) => {
         const previousPeriodData = await db.query(
             `SELECT
                 COALESCE(SUM(total_amount), 0) AS total_sales,
-                COALESCE(SUM(total_profit), 0) AS total_profit
+                COALESCE(SUM(total_cogs), 0) AS total_cogs,
+                COALESCE(SUM(total_amount - total_cogs), 0) AS total_profit
             FROM sales_transactions
             WHERE sale_date >= $1 AND sale_date <= $2 AND status != 'Cancelled' ${branchFilter};`,
             previousQueryParams
         );
+
+        const currentSales = parseFloat(currentPeriodData.rows[0].total_sales);
+        const currentProfit = parseFloat(currentPeriodData.rows[0].total_profit);
+        const previousSales = parseFloat(previousPeriodData.rows[0].total_sales);
+        const previousProfit = parseFloat(previousPeriodData.rows[0].total_profit);
+
+        console.log('Sales Comparison - Corrected Profit:', {
+            currentPeriod: { sales: currentSales, profit: currentProfit },
+            previousPeriod: { sales: previousSales, profit: previousProfit },
+            profitCalculation: 'Using (Sales - COGS) instead of stored profit field'
+        });
 
         res.status(200).json({
             period: period,
@@ -104,15 +118,16 @@ router.get('/sales-comparison', async (req, res) => {
             currentPeriod: {
                 start: currentPeriodStart,
                 end: currentPeriodEnd,
-                sales: parseFloat(currentPeriodData.rows[0].total_sales),
-                profit: parseFloat(currentPeriodData.rows[0].total_profit),
+                sales: currentSales,
+                profit: currentProfit,
             },
             previousPeriod: {
                 start: previousPeriodStart,
                 end: previousPeriodEnd,
-                sales: parseFloat(previousPeriodData.rows[0].total_sales),
-                profit: parseFloat(previousPeriodData.rows[0].total_profit),
-            }
+                sales: previousSales,
+                profit: previousProfit,
+            },
+            dataNote: 'Profit calculated as (Sales - COGS) to correct database inconsistency'
         });
 
     } catch (error) {
@@ -135,14 +150,16 @@ router.get('/profit-margin-trend', async (req, res) => {
         orderBy = `DATE(sale_date)`;
     }
 
+    // Updated to calculate profit correctly as (sales - COGS)
     let query = `
         SELECT
             ${groupBy} AS period_label,
             COALESCE(SUM(total_amount), 0) AS total_revenue,
             COALESCE(SUM(total_cogs), 0) AS total_cogs,
+            COALESCE(SUM(total_amount - total_cogs), 0) AS total_profit,
             CASE
                 WHEN COALESCE(SUM(total_amount), 0) > 0 THEN
-                    (COALESCE(SUM(total_amount), 0) - COALESCE(SUM(total_cogs), 0)) / COALESCE(SUM(total_amount), 0) * 100
+                    (COALESCE(SUM(total_amount - total_cogs), 0) / COALESCE(SUM(total_amount), 0)) * 100
                 ELSE 0
             END AS gross_profit_margin
         FROM sales_transactions
@@ -169,7 +186,8 @@ router.get('/profit-margin-trend', async (req, res) => {
         const result = await db.query(query, params);
         res.status(200).json({
             filtersUsed: { period, limit, branchId, startDate, endDate },
-            reportData: result.rows.reverse()
+            reportData: result.rows.reverse(),
+            dataNote: 'Profit and margin calculated using (Sales - COGS)'
         });
     } catch (error) {
         console.error('Error fetching profit margin trend:', error);
