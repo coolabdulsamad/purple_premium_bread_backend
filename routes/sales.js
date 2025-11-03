@@ -140,6 +140,11 @@ router.post('/process', async (req, res) => {
             const cogsPerUnit = await calculateProductCogs(productId, client);
             totalCogs += cogsPerUnit * quantity;
         }
+        
+        // **NEW CALCULATION**
+        const totalProfit = total - totalCogs; 
+        // **END NEW CALCULATION**
+
 
         // Add free items (if applicable)
         if (freeStock && freeStock.quantities) {
@@ -173,15 +178,16 @@ router.post('/process', async (req, res) => {
         }
 
         // --- STEP 4: Record the Sale ---
+        // **UPDATED QUERY: Added total_profit and adjusted placeholders**
         const saleInsertQuery = `
     INSERT INTO sales_transactions (
         subtotal, tax_amount, total_amount, discount_amount, cashier_id, 
         payment_method, customer_id, note, payment_reference, 
         payment_image_url, status, amount_paid, balance_due, due_date, 
-        total_cogs, stock_source, stock_source_user_id
+        total_cogs, total_profit, stock_source, stock_source_user_id 
     )
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 
-            $11, $12, $13, $14, $15, $16, $17)
+            $11, $12, $13, $14, $15, $16, $17, $18) 
     RETURNING id;
 `;
 
@@ -194,12 +200,12 @@ router.post('/process', async (req, res) => {
             stockSourceUserId = cashierId;
         }
 
-        // Update the saleResult call:
+        // **UPDATED PARAMS: Included totalProfit**
         const saleResult = await client.query(saleInsertQuery, [
             subtotal, tax, total, discountAmount, cashierId,
             paymentMethod, customerId, note, paymentReference,
             paymentImageUrl, status, amountPaid, balanceDue, dueDate,
-            totalCogs, stockSource, stockSourceUserId
+            totalCogs, totalProfit, stockSource, stockSourceUserId
         ]);
         const saleId = saleResult.rows[0].id;
 
