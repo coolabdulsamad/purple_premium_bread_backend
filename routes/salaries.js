@@ -472,37 +472,31 @@ router.post('/payments', async (req, res) => {
             components = []
         } = req.body;
 
-        // 1. Validate user exists (Return 404)
+        // Validate user exists
         const userCheck = await client.query('SELECT id FROM users WHERE id = $1', [user_id]);
         if (userCheck.rows.length === 0) {
-            await client.query('ROLLBACK');
-            return res.status(404).json({ error: 'Validation Error', details: 'Invalid staff member ID' });
+            throw new Error('Invalid staff member ID');
         }
 
-        // 2. Validate paid_by user exists (Return 404)
+        // Validate paid_by user exists
         if (paid_by) {
             const paidByCheck = await client.query('SELECT id FROM users WHERE id = $1', [paid_by]);
             if (paidByCheck.rows.length === 0) {
-                await client.query('ROLLBACK');
-                return res.status(404).json({ error: 'Validation Error', details: 'Invalid user ID for paid_by field' });
+                throw new Error('Invalid user ID for paid_by field');
             }
         }
 
         // Calculate net amount
         const netAmount = parseFloat(base_salary) + parseFloat(allowances) - parseFloat(deductions) - parseFloat(tax_amount) - parseFloat(pension_amount);
 
-        // 3. Check for duplicate payment for same period (Return 409)
+        // Check for duplicate payment for same period
         const duplicateCheck = await client.query(
             'SELECT id FROM salary_payments WHERE user_id = $1 AND salary_period = $2',
             [user_id, salary_period]
         );
 
         if (duplicateCheck.rows.length > 0) {
-            await client.query('ROLLBACK');
-            return res.status(409).json({ 
-                error: 'Duplicate Payment', 
-                details: 'Salary payment for this period already exists for this staff member.' 
-            });
+            throw new Error('Salary payment for this period already exists for this staff member.');
         }
 
         // Insert salary payment
@@ -555,13 +549,14 @@ router.post('/payments', async (req, res) => {
         res.status(201).json(paymentResult.rows[0]);
 
     } catch (error) {
-        // This catch block is now reserved for unexpected server/database errors (500)
         await client.query('ROLLBACK');
         console.error('Error processing salary payment:', error);
         
-        // Final fallback to 500 for unhandled exceptions
-        res.status(500).json({ error: 'Failed to process salary payment.', details: error.message });
+        if (error.message.includes('duplicate')) {
+            return res.status(409).json({ error: 'Duplicate payment', details: error.message });
+        }
         
+        res.status(500).json({ error: 'Failed to process salary payment.', details: error.message });
     } finally {
         client.release();
     }
