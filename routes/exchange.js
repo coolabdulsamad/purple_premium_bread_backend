@@ -261,10 +261,11 @@ router.get('/pending', authenticate, async (req, res) => {
     }
 });
 
-// ---
+//
 
 /**
- * Route 5: Get Exchange History (Completed/Recorded exchanges)
+ * Route 5: Get Exchange History (All exchanges)
+ * FIX: Removed WHERE er.status = 'RECORDED' to allow frontend filtering of all statuses.
  */
 router.get('/history', authenticate, async (req, res) => {
     const currentUserId = req.user.id;
@@ -280,12 +281,13 @@ router.get('/history', authenticate, async (req, res) => {
                 er.id, er.created_at, er.updated_at, er.reason, er.items_requested_jsonb, er.status,
                 c.fullname AS customer_name,
                 u.fullname AS requested_by_user_name,
-                ua.fullname AS approved_by_user_name
+                ua.fullname AS approved_by_user_name,
+                er.original_sale_id -- ADDED: Included for display on the frontend
             FROM exchange_requests er
             JOIN customers c ON er.customer_id = c.id
             JOIN users u ON er.requested_by_user_id = u.id
             LEFT JOIN users ua ON er.approved_by_user_id = ua.id
-            WHERE er.status = 'RECORDED'
+            -- Removed WHERE er.status = 'RECORDED'
             ORDER BY er.updated_at DESC;
         `;
     } else if (userRole === 'SALES') {
@@ -295,12 +297,14 @@ router.get('/history', authenticate, async (req, res) => {
                 er.id, er.created_at, er.updated_at, er.reason, er.items_requested_jsonb, er.status,
                 c.fullname AS customer_name,
                 u.fullname AS requested_by_user_name,
-                ua.fullname AS approved_by_user_name
+                ua.fullname AS approved_by_user_name,
+                er.original_sale_id -- ADDED: Included for display on the frontend
             FROM exchange_requests er
             JOIN customers c ON er.customer_id = c.id
             JOIN users u ON er.requested_by_user_id = u.id
             LEFT JOIN users ua ON er.approved_by_user_id = ua.id
-            WHERE er.status = 'RECORDED' AND er.requested_by_user_id = $1
+            -- Removed WHERE er.status = 'RECORDED'
+            WHERE er.requested_by_user_id = $1
             ORDER BY er.updated_at DESC;
         `;
         params.push(currentUserId);
