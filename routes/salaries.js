@@ -804,4 +804,23 @@ router.get('/loans/outstanding/:userId', authenticate, async (req, res) => {
     }
 });
 
+// GET /api/salaries/loans/details/:userId - Get details of all outstanding loans for deduction
+router.get('/loans/details/:userId', authenticate, async (req, res) => {
+    const { userId } = req.params;
+    try {
+        const query = `
+            SELECT id, amount, loan_date, reason
+            FROM staff_loans
+            WHERE user_id = $1 AND is_paid = FALSE
+            ORDER BY loan_date ASC;
+        `;
+        const result = await db.query(query, [userId]);
+        // Returns an array like: [{id: 1, amount: 5000, ...}, {id: 2, amount: 3000, ...}]
+        res.status(200).json(result.rows);
+    } catch (error) {
+        console.error('Error fetching outstanding loan details:', error);
+        res.status(500).json({ error: 'Failed to fetch outstanding loan details.', details: error.message });
+    }
+});
+
 module.exports = router;
