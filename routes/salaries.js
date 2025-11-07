@@ -2,6 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db/db');
+const { authenticate } = require('../middleware/authenticate');
 
 // GET /api/salaries/staff - Get all staff with salary information
 router.get('/staff', async (req, res) => {
