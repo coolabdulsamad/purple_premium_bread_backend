@@ -6,11 +6,11 @@ const db = require('../db/db');
 // GET /api/salaries/staff - Get all staff with salary information
 router.get('/staff', async (req, res) => {
     try {
-        const { 
-            role, 
-            search, 
-            salaryType, 
-            minSalary, 
+        const {
+            role,
+            search,
+            salaryType,
+            minSalary,
             maxSalary,
             isActive = 'true'
         } = req.query;
@@ -29,12 +29,14 @@ router.get('/staff', async (req, res) => {
                 ss.pension_rate,
                 ss.is_active as salary_active,
                 (SELECT COUNT(*) FROM salary_payments sp WHERE sp.user_id = u.id AND sp.status = 'paid') as total_payments,
-                (SELECT MAX(payment_date) FROM salary_payments sp WHERE sp.user_id = u.id AND sp.status = 'paid') as last_payment_date
+                (SELECT MAX(payment_date) FROM salary_payments sp WHERE sp.user_id = u.id AND sp.status = 'paid') as last_payment_date,
+                -- ADDED: Outstanding Loan Amount
+                (SELECT COALESCE(SUM(sl.amount), 0) FROM staff_loans sl WHERE sl.user_id = u.id AND sl.is_paid = FALSE) as outstanding_loan_amount
             FROM users u
-            LEFT JOIN staff_salaries ss ON u.id = ss.user_id AND ss.is_active = true
+            LEFT JOIN staff_salaries ss ON u.id = ss.user_id
             WHERE u.is_active = $1
         `;
-        
+
         const params = [isActive === 'true'];
         let paramCount = 2;
 
@@ -128,7 +130,7 @@ router.get('/payments', async (req, res) => {
         // Date filters with period support
         if (period) {
             let dateCondition = '';
-            
+
             switch (period) {
                 case 'today':
                     dateCondition = `DATE(sp.payment_date) = CURRENT_DATE`;
@@ -146,7 +148,7 @@ router.get('/payments', async (req, res) => {
                     dateCondition = `sp.payment_date >= DATE_TRUNC('year', CURRENT_DATE) AND sp.payment_date < DATE_TRUNC('year', CURRENT_DATE) + INTERVAL '1 year'`;
                     break;
             }
-            
+
             if (dateCondition) {
                 query += ` AND ${dateCondition}`;
             }
@@ -213,7 +215,7 @@ router.get('/payments', async (req, res) => {
 
         // Add ordering and pagination
         query += ` ORDER BY sp.payment_date DESC, sp.created_at DESC`;
-        
+
         const offset = (page - 1) * limit;
         query += ` LIMIT $${paramCount} OFFSET $${paramCount + 1}`;
         params.push(parseInt(limit), offset);
@@ -263,7 +265,7 @@ router.get('/payments', async (req, res) => {
 
         if (period) {
             let dateCondition = '';
-            
+
             switch (period) {
                 case 'today':
                     dateCondition = `DATE(sp.payment_date) = CURRENT_DATE`;
@@ -281,7 +283,7 @@ router.get('/payments', async (req, res) => {
                     dateCondition = `sp.payment_date >= DATE_TRUNC('year', CURRENT_DATE) AND sp.payment_date < DATE_TRUNC('year', CURRENT_DATE) + INTERVAL '1 year'`;
                     break;
             }
-            
+
             if (dateCondition) {
                 summaryQuery += ` AND ${dateCondition}`;
             }
@@ -431,15 +433,15 @@ router.post('/staff/:id/salary', async (req, res) => {
         `;
 
         const result = await db.query(query, [
-            id, 
-            parseFloat(base_salary), 
-            parseFloat(allowances || 0), 
-            parseFloat(deductions || 0), 
+            id,
+            parseFloat(base_salary),
+            parseFloat(allowances || 0),
+            parseFloat(deductions || 0),
             netSalary,
-            salary_type, 
-            bank_name, 
-            account_number, 
-            parseFloat(tax_rate || 0), 
+            salary_type,
+            bank_name,
+            account_number,
+            parseFloat(tax_rate || 0),
             parseFloat(pension_rate || 0)
         ]);
 
@@ -450,99 +452,69 @@ router.post('/staff/:id/salary', async (req, res) => {
     }
 });
 
-// POST /api/salaries/payments - Process salary payment
-router.post('/payments', async (req, res) => {
-    const client = await db.pool.connect();
+// POST /api/salaries/payments - Record a new salary payment
+router.post('/payments', authenticate, async (req, res) => {
+    // FIX: Get paid_by ID from authenticated user, ensuring it's not null.
+    const paid_by = parseInt(req.user.id); 
+    if (!paid_by || isNaN(paid_by)) {
+        return res.status(403).json({ error: 'Unauthorized', details: 'Authenticated user ID is missing or invalid.' });
+    }
+    
+    // gross_amount, deductions, net_amount, loan_deduction are now expected to be passed as computed on the frontend
+    const { 
+        user_id, 
+        payment_date, 
+        gross_amount, 
+        deductions, // This is the 'Other Deductions' amount
+        net_amount, 
+        payment_method, 
+        reference_number, 
+        notes,
+        loan_deduction, // The outstanding loan amount computed on the frontend
+        loan_ids // Array of IDs of the loans to be marked as paid
+    } = req.body;
+
+    if (!user_id || !payment_date || !gross_amount || !net_amount) {
+        return res.status(400).json({ error: 'Missing required fields for payment.' });
+    }
+
+    // Calculate total deduction for the database record
+    const total_deductions = (parseFloat(deductions) || 0) + (parseFloat(loan_deduction) || 0);
+
+    // Start a transaction for atomicity
+    const client = await db.getClient();
     try {
         await client.query('BEGIN');
 
-        const {
-            user_id,
-            salary_period,
-            payment_date,
-            base_salary,
-            allowances = 0,
-            deductions = 0,
-            tax_amount = 0,
-            pension_amount = 0,
-            payment_method,
-            payment_reference,
-            paid_by,
-            notes,
-            components = []
-        } = req.body;
-
-        // Validate user exists
-        const userCheck = await client.query('SELECT id FROM users WHERE id = $1', [user_id]);
-        if (userCheck.rows.length === 0) {
-            throw new Error('Invalid staff member ID');
-        }
-
-        // Validate paid_by user exists
-        if (paid_by) {
-            const paidByCheck = await client.query('SELECT id FROM users WHERE id = $1', [paid_by]);
-            if (paidByCheck.rows.length === 0) {
-                throw new Error('Invalid user ID for paid_by field');
-            }
-        }
-
-        // Calculate net amount
-        const netAmount = parseFloat(base_salary) + parseFloat(allowances) - parseFloat(deductions) - parseFloat(tax_amount) - parseFloat(pension_amount);
-
-        // Check for duplicate payment for same period
-        const duplicateCheck = await client.query(
-            'SELECT id FROM salary_payments WHERE user_id = $1 AND salary_period = $2',
-            [user_id, salary_period]
-        );
-
-        if (duplicateCheck.rows.length > 0) {
-            throw new Error('Salary payment for this period already exists for this staff member.');
-        }
-
-        // Insert salary payment
+        // 1. Insert the Salary Payment
         const paymentQuery = `
-            INSERT INTO salary_payments (
-                user_id, salary_period, payment_date, base_salary, allowances,
-                deductions, tax_amount, pension_amount, net_amount,
-                payment_method, payment_reference, paid_by, notes, status
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'paid')
-            RETURNING *
+            INSERT INTO salary_payments 
+                (user_id, payment_date, gross_amount, deductions, net_amount, payment_method, reference_number, notes, paid_by, status, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'paid', CURRENT_TIMESTAMP)
+            RETURNING id, deductions;
         `;
-
         const paymentResult = await client.query(paymentQuery, [
-            user_id, 
-            salary_period, 
-            payment_date, 
-            parseFloat(base_salary), 
-            parseFloat(allowances),
-            parseFloat(deductions), 
-            parseFloat(tax_amount), 
-            parseFloat(pension_amount), 
-            netAmount,
-            payment_method, 
-            payment_reference, 
-            paid_by, 
-            notes
+            user_id,
+            payment_date,
+            gross_amount,
+            total_deductions, // Use the combined deduction amount here
+            net_amount,
+            payment_method,
+            reference_number,
+            notes,
+            paid_by // FIX: Use the validated integer ID for paid_by
         ]);
+        const newPaymentId = paymentResult.rows[0].id;
 
-        const paymentId = paymentResult.rows[0].id;
-
-        // Insert salary components if provided
-        if (components.length > 0) {
-            const componentsQuery = `
-                INSERT INTO salary_components (salary_payment_id, component_type, component_name, amount, description)
-                VALUES ($1, $2, $3, $4, $5)
+        // 2. Update the Loan Status (if loans were deducted)
+        if (loan_ids && loan_ids.length > 0) {
+            const loanUpdateQuery = `
+                UPDATE staff_loans
+                SET is_paid = TRUE, deducted_on_payment_id = $1, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ANY($2::int[]) AND user_id = $3 AND is_paid = FALSE;
             `;
-
-            for (const component of components) {
-                await client.query(componentsQuery, [
-                    paymentId,
-                    component.component_type,
-                    component.component_name,
-                    parseFloat(component.amount),
-                    component.description
-                ]);
-            }
+            // Ensure loan_ids are an array of integers if necessary, or pass directly as a PostgreSQL array
+            await client.query(loanUpdateQuery, [newPaymentId, loan_ids, user_id]);
         }
 
         await client.query('COMMIT');
@@ -551,11 +523,7 @@ router.post('/payments', async (req, res) => {
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('Error processing salary payment:', error);
-        
-        if (error.message.includes('duplicate')) {
-            return res.status(409).json({ error: 'Duplicate payment', details: error.message });
-        }
-        
+        // This is the source of the 500 error you saw: "Invalid user ID for paid_by field"
         res.status(500).json({ error: 'Failed to process salary payment.', details: error.message });
     } finally {
         client.release();
@@ -688,9 +656,9 @@ router.delete('/payments/:id', async (req, res) => {
         }
 
         await client.query('COMMIT');
-        res.status(200).json({ 
-            message: 'Salary payment deleted successfully.', 
-            deletedPayment: result.rows[0] 
+        res.status(200).json({
+            message: 'Salary payment deleted successfully.',
+            deletedPayment: result.rows[0]
         });
 
     } catch (error) {
@@ -726,7 +694,7 @@ router.get('/staff/:id/payments', async (req, res) => {
         `;
 
         const countQuery = `SELECT COUNT(*) FROM salary_payments WHERE user_id = $1`;
-        
+
         const [result, countResult] = await Promise.all([
             db.query(query, [id, parseInt(limit), (parseInt(page) - 1) * parseInt(limit)]),
             db.query(countQuery, [id])
@@ -787,6 +755,52 @@ router.get('/dashboard/stats', async (req, res) => {
     } catch (error) {
         console.error('Error fetching dashboard stats:', error);
         res.status(500).json({ error: 'Failed to fetch dashboard statistics.', details: error.message });
+    }
+});
+
+// POST /api/salaries/loans - Record a new staff loan/advance
+router.post('/loans', authenticate, async (req, res) => {
+    const { user_id, loan_date, amount, reason } = req.body;
+    const recorded_by = req.user.id;
+
+    if (!user_id || !loan_date || !amount) {
+        return res.status(400).json({ error: 'Missing required fields: user_id, loan_date, and amount.' });
+    }
+
+    // Ensure amount is positive
+    if (parseFloat(amount) <= 0) {
+        return res.status(400).json({ error: 'Loan amount must be greater than zero.' });
+    }
+
+    try {
+        const query = `
+            INSERT INTO staff_loans 
+                (user_id, loan_date, amount, reason, created_at)
+            VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+            RETURNING *
+        `;
+        const result = await db.query(query, [user_id, loan_date, amount, reason]);
+        res.status(201).json(result.rows[0]);
+    } catch (error) {
+        console.error('Error recording staff loan:', error);
+        res.status(500).json({ error: 'Failed to record staff loan.', details: error.message });
+    }
+});
+
+// GET /api/salaries/loans/outstanding/:userId - Get total outstanding loan for a staff member
+router.get('/loans/outstanding/:userId', authenticate, async (req, res) => {
+    const { userId } = req.params;
+    try {
+        const query = `
+            SELECT COALESCE(SUM(amount), 0) AS outstanding_loan_amount
+            FROM staff_loans
+            WHERE user_id = $1 AND is_paid = FALSE;
+        `;
+        const result = await db.query(query, [userId]);
+        res.status(200).json(result.rows[0]);
+    } catch (error) {
+        console.error('Error fetching outstanding loan:', error);
+        res.status(500).json({ error: 'Failed to fetch outstanding loan.', details: error.message });
     }
 });
 
