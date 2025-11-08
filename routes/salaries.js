@@ -332,7 +332,7 @@ router.post('/staff/:id/salary', async (req, res) => {
     }
 });
 
-// routes/salaries.js - UPDATED PAYMENT ROUTE
+// routes/salaries.js - FIXED PAYMENT ROUTE
 router.post('/payments', authenticate, async (req, res) => {
     const paid_by = parseInt(req.user.id);
     if (!paid_by || isNaN(paid_by)) {
@@ -356,6 +356,11 @@ router.post('/payments', authenticate, async (req, res) => {
         loan_ids
     } = req.body;
 
+    console.log('Payment data received:', {
+        user_id, salary_period, payment_date, base_salary, allowances,
+        deductions, tax_amount, pension_amount, net_amount, loan_deduction
+    });
+
     if (!user_id || !payment_date || !base_salary || !net_amount) {
         return res.status(400).json({ error: 'Missing required fields for payment.' });
     }
@@ -364,26 +369,38 @@ router.post('/payments', authenticate, async (req, res) => {
     try {
         await client.query('BEGIN');
 
+        // Calculate gross amount from base_salary + allowances
+        const gross_amount = parseFloat(base_salary || 0) + parseFloat(allowances || 0);
+        
+        // Calculate total deductions (including tax, pension, other deductions, and loans)
+        const total_deductions = parseFloat(deductions || 0) + 
+                                parseFloat(tax_amount || 0) + 
+                                parseFloat(pension_amount || 0) +
+                                parseFloat(loan_deduction || 0);
+
+        console.log('Calculated values:', { gross_amount, total_deductions });
+
         // Insert the Salary Payment with all fields
         const paymentQuery = `
             INSERT INTO salary_payments 
                 (user_id, salary_period, payment_date, base_salary, allowances, 
-                 deductions, tax_amount, pension_amount, net_amount, 
+                 deductions, tax_amount, pension_amount, net_amount, gross_amount,
                  payment_method, payment_reference, notes, paid_by, status, created_at, loan_deduction)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'paid', CURRENT_TIMESTAMP, $14)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'paid', CURRENT_TIMESTAMP, $15)
             RETURNING id
         `;
         
         const paymentResult = await client.query(paymentQuery, [
             user_id,
-            salary_period || payment_date, // Use payment_date as salary_period if not provided
+            salary_period || payment_date,
             payment_date,
             parseFloat(base_salary || 0),
             parseFloat(allowances || 0),
-            parseFloat(deductions || 0),
+            parseFloat(deductions || 0), // This is "other deductions"
             parseFloat(tax_amount || 0),
             parseFloat(pension_amount || 0),
             parseFloat(net_amount),
+            gross_amount, // Calculated gross amount
             payment_method,
             payment_reference,
             notes,
