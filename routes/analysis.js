@@ -1,4 +1,4 @@
-// purple-premium-bread-api/routes/analysis.js
+// purple-premium-bread-api/routes/analysis.js - UPDATED VERSION
 const express = require('express');
 const router = express.Router();
 const db = require('../db/db');
@@ -262,6 +262,10 @@ router.get('/inventory-turnover', async (req, res) => {
                 cogs: cogs,
                 averageInventoryValue: currentInventoryValue,
                 inventoryTurnoverRate: turnoverRate,
+                turnover_ratio: turnoverRate,
+                days_in_inventory: currentInventoryValue > 0 ? (365 / turnoverRate) : 0,
+                cost_of_goods_sold: cogs,
+                average_inventory: currentInventoryValue,
                 explanation: "Inventory turnover rate (COGS / Average Inventory Value). Note: Average inventory is approximated using current stock value for simplicity."
             }
         });
@@ -332,7 +336,7 @@ router.get('/sales-trend-by-category-product', async (req, res) => {
     }
 });
 
-// GET /api/analysis/top-customers-by-sales
+// GET /api/analysis/top-customers-by-sales - UPDATED with profit calculation
 router.get('/top-customers-by-sales', async (req, res) => {
     const { startDate, endDate, limit = 10, branchId } = req.query;
     let query = `
@@ -340,7 +344,12 @@ router.get('/top-customers-by-sales', async (req, res) => {
             c.id AS customer_id,
             c.fullname AS customer_name,
             COALESCE(SUM(st.total_amount), 0) AS total_sales_amount,
-            COUNT(st.id) AS total_transactions
+            COALESCE(SUM(st.total_amount - st.total_cogs), 0) AS total_profit,
+            COUNT(st.id) AS total_transactions,
+            CASE 
+                WHEN COUNT(st.id) > 0 THEN COALESCE(AVG(st.total_amount), 0)
+                ELSE 0 
+            END AS avg_transaction_amount
         FROM customers c
         JOIN sales_transactions st ON c.id = st.customer_id
         WHERE st.status != 'Cancelled'
@@ -499,7 +508,7 @@ router.get('/raw-material-stock-value-trend', async (req, res) => {
     }
 });
 
-// GET /api/analysis/customer-lifetime-value - Include ALL customers
+// GET /api/analysis/customer-lifetime-value - Include ALL customers - UPDATED with complete data
 router.get('/customer-lifetime-value', async (req, res) => {
     const { startDate, endDate, customerId, limit = 10, branchId } = req.query;
 
@@ -507,15 +516,17 @@ router.get('/customer-lifetime-value', async (req, res) => {
         SELECT
             c.id AS customer_id,
             c.fullname AS customer_name,
+            COALESCE(SUM(CASE WHEN st.status != 'Cancelled' THEN st.total_amount ELSE 0 END), 0) AS total_revenue_generated,
             COALESCE(SUM(CASE WHEN st.status != 'Cancelled' THEN st.total_amount - st.total_cogs ELSE 0 END), 0) AS total_profit_generated,
             COUNT(CASE WHEN st.status != 'Cancelled' THEN st.id END) AS total_transactions,
-            COALESCE(SUM(CASE WHEN st.status != 'Cancelled' THEN st.total_amount ELSE 0 END), 0) AS total_revenue_generated,
             CASE 
-                WHEN MIN(st.sale_date) IS NOT NULL THEN
-                    EXTRACT(EPOCH FROM (COALESCE(MAX(st.sale_date), CURRENT_TIMESTAMP) - MIN(st.sale_date))) / (3600 * 24 * 30.5)
-                ELSE 0
-            END AS customer_lifespan_months,
-            c.created_at AS customer_since
+                WHEN MIN(st.sale_date) IS NOT NULL THEN MIN(st.sale_date)
+                ELSE c.created_at
+            END AS first_transaction_date,
+            CASE 
+                WHEN COUNT(st.id) > 0 THEN COALESCE(AVG(st.total_amount), 0)
+                ELSE 0 
+            END AS avg_transaction_value
         FROM customers c
         LEFT JOIN sales_transactions st ON c.id = st.customer_id
         WHERE (c.is_active IS NULL OR c.is_active = true)
@@ -563,27 +574,18 @@ router.get('/customer-lifetime-value', async (req, res) => {
 
         const cltvData = result.rows.map(row => {
             const totalProfitGenerated = parseFloat(row.total_profit_generated);
-            const totalTransactions = parseInt(row.total_transactions);
-            const customerLifespanMonths = parseFloat(row.customer_lifespan_months);
             const totalRevenue = parseFloat(row.total_revenue_generated);
-
-            // Calculate CLTV - for customers with 0 transactions, show 0 or minimal value
-            let approximatedCLTV = 0;
-            if (totalTransactions > 0 && customerLifespanMonths > 0) {
-                const avgProfitPerTransaction = totalProfitGenerated / totalTransactions;
-                const avgTransactionsPerMonth = totalTransactions / customerLifespanMonths;
-                const estimatedFutureLifespanMonths = 24;
-                approximatedCLTV = avgProfitPerTransaction * avgTransactionsPerMonth * estimatedFutureLifespanMonths;
-            }
+            const totalTransactions = parseInt(row.total_transactions);
+            const avgTransactionValue = parseFloat(row.avg_transaction_value);
 
             return {
                 customer_id: row.customer_id,
                 customer_name: row.customer_name,
-                total_profit_generated: totalProfitGenerated,
-                total_revenue_generated: totalRevenue,
+                total_revenue: totalRevenue,
+                total_profit: totalProfitGenerated,
                 total_transactions: totalTransactions,
-                customer_lifespan_months: customerLifespanMonths.toFixed(1),
-                approximated_cltv: Math.max(0, approximatedCLTV),
+                avg_transaction_value: avgTransactionValue,
+                first_transaction_date: row.first_transaction_date,
                 has_transactions: totalTransactions > 0
             };
         });
@@ -600,7 +602,7 @@ router.get('/customer-lifetime-value', async (req, res) => {
     }
 });
 
-// GET /api/analysis/free-items - Analyze free items given
+// GET /api/analysis/free-items - Analyze free items given - UPDATED with complete data
 router.get('/free-items', async (req, res) => {
     const { startDate, endDate, productId, branchId, limit = 10 } = req.query;
     
@@ -610,7 +612,17 @@ router.get('/free-items', async (req, res) => {
             SUM(fsl.quantity) AS total_quantity,
             fsl.reason,
             TO_CHAR(fsl.recorded_at, 'YYYY-MM') AS period_label,
-            u.fullname AS recorded_by_name
+            u.fullname AS recorded_by_name,
+            (SUM(fsl.quantity) * p.price) AS total_free_value,
+            CASE 
+                WHEN (SELECT COALESCE(SUM(si.quantity), 1) FROM sales_items si 
+                      JOIN sales_transactions st ON si.sale_id = st.id 
+                      WHERE st.status != 'Cancelled' AND si.product_id = p.id) > 0 THEN
+                    (SUM(fsl.quantity) / (SELECT COALESCE(SUM(si.quantity), 1) FROM sales_items si 
+                                         JOIN sales_transactions st ON si.sale_id = st.id 
+                                         WHERE st.status != 'Cancelled' AND si.product_id = p.id)) * 100
+                ELSE 0
+            END AS free_percentage
         FROM free_stock_log fsl
         JOIN products p ON fsl.product_id = p.id
         JOIN sales_transactions st ON fsl.sale_id = st.id
@@ -632,7 +644,7 @@ router.get('/free-items', async (req, res) => {
     }
 
     query += `
-        GROUP BY p.name, fsl.reason, TO_CHAR(fsl.recorded_at, 'YYYY-MM'), u.fullname
+        GROUP BY p.name, fsl.reason, TO_CHAR(fsl.recorded_at, 'YYYY-MM'), u.fullname, p.price
         ORDER BY total_quantity DESC
     `;
 
@@ -693,7 +705,7 @@ router.get('/discounts', async (req, res) => {
     }
 });
 
-// GET /api/analysis/exchanges - Analyze bread exchanges
+// GET /api/analysis/exchanges - Analyze bread exchanges - UPDATED with complete data
 router.get('/exchanges', async (req, res) => {
     const { startDate, endDate, status, branchId, limit = 10 } = req.query;
     
@@ -704,13 +716,15 @@ router.get('/exchanges', async (req, res) => {
             TO_CHAR(er.created_at, 'YYYY-MM') AS period_label,
             c.fullname AS customer_name,
             u.fullname AS requested_by,
-            COUNT(*) FILTER (WHERE er.status = 'APPROVED') AS approved_count,
-            COUNT(*) FILTER (WHERE er.status = 'PENDING') AS pending_count,
-            COUNT(*) FILTER (WHERE er.status = 'REJECTED') AS rejected_count
+            p.name AS product_name,
+            (er.items_requested_jsonb->0->>'quantity')::integer AS exchange_quantity,
+            ((er.items_requested_jsonb->0->>'quantity')::integer * p.price) AS exchange_value,
+            er.reason AS exchange_reason
         FROM exchange_requests er
         JOIN customers c ON er.customer_id = c.id
         JOIN users u ON er.requested_by_user_id = u.id
         JOIN sales_transactions st ON er.original_sale_id = st.id
+        JOIN products p ON (er.items_requested_jsonb->0->>'productId')::integer = p.id
         WHERE 1=1
     `;
     let params = [];
@@ -728,7 +742,8 @@ router.get('/exchanges', async (req, res) => {
     }
 
     query += `
-        GROUP BY er.status, TO_CHAR(er.created_at, 'YYYY-MM'), c.fullname, u.fullname
+        GROUP BY er.status, TO_CHAR(er.created_at, 'YYYY-MM'), c.fullname, u.fullname, 
+                 p.name, er.items_requested_jsonb, er.reason
         ORDER BY period_label DESC, total_exchanges DESC
     `;
 
@@ -746,7 +761,7 @@ router.get('/exchanges', async (req, res) => {
     }
 });
 
-// GET /api/analysis/stock-allocation - Analyze stock allocation to sales users
+// GET /api/analysis/stock-allocation - Analyze stock allocation to sales users - UPDATED with complete data
 router.get('/stock-allocation', async (req, res) => {
     const { userId, productId, branchId, limit = 10 } = req.query;
     
@@ -756,9 +771,13 @@ router.get('/stock-allocation', async (req, res) => {
             u.role,
             p.name AS product_name,
             sus.quantity AS allocated_quantity,
-            sus.last_updated,
+            sus.last_updated AS allocation_date,
             b.name AS branch_name,
-            (sus.quantity * p.price) AS stock_value
+            (sus.quantity * p.price) AS stock_value,
+            CASE 
+                WHEN sus.quantity > 0 THEN 'Active'
+                ELSE 'Inactive'
+            END AS status
         FROM sales_user_stock sus
         JOIN users u ON sus.user_id = u.id
         JOIN products p ON sus.product_id = p.id
@@ -797,7 +816,7 @@ router.get('/stock-allocation', async (req, res) => {
     }
 });
 
-// GET /api/analysis/salaries - Analyze salary and wages
+// GET /api/analysis/salaries - Analyze salary and wages - UPDATED with complete data
 router.get('/salaries', async (req, res) => {
     const { startDate, endDate, userId, branchId, limit = 10 } = req.query;
     
@@ -805,11 +824,11 @@ router.get('/salaries', async (req, res) => {
         SELECT 
             u.fullname AS staff_name,
             u.role,
-            sp.base_salary,
+            sp.base_salary AS basic_salary,
             sp.allowances,
             sp.deductions,
             sp.net_amount AS net_salary,
-            TO_CHAR(sp.salary_period, 'YYYY-MM') AS period_label,
+            TO_CHAR(sp.salary_period, 'YYYY-MM') AS pay_period,
             sp.payment_method,
             sp.status
         FROM salary_payments sp
@@ -846,17 +865,13 @@ router.get('/salaries', async (req, res) => {
 router.get('/operating-expenses', async (req, res) => {
     const { startDate, endDate, category, branchId, limit = 10 } = req.query;
     
-    let baseCondition = startDate && endDate ? 
-        `AND expense_date BETWEEN '${startDate}' AND '${endDate}'` : 
-        '';
-
     let query = `
         SELECT 
             oe.category,
             SUM(oe.amount) AS total_amount,
             TO_CHAR(oe.expense_date, 'YYYY-MM') AS period_label,
             COUNT(oe.id) AS total_expenses,
-            (SUM(oe.amount) / NULLIF((SELECT COALESCE(SUM(amount), 1) FROM operating_expenses WHERE 1=1 ${baseCondition}), 0)) * 100 AS percentage
+            (SUM(oe.amount) / NULLIF((SELECT COALESCE(SUM(amount), 1) FROM operating_expenses WHERE 1=1), 0)) * 100 AS percentage
         FROM operating_expenses oe
         WHERE 1=1
     `;
@@ -909,7 +924,8 @@ router.get('/staff-performance', async (req, res) => {
             COALESCE(SUM(st.total_amount - st.total_cogs), 0) AS total_profit,
             COALESCE(SUM(st.total_profit), 0) AS stored_profit_incorrect,
             AVG(st.total_amount) AS avg_transaction_value,
-            COALESCE(SUM(st.discount_amount), 0) AS total_discounts_given
+            COALESCE(SUM(st.discount_amount), 0) AS total_discounts_given,
+            TO_CHAR(MIN(st.sale_date), 'YYYY-MM') AS period_label
         FROM users u
         LEFT JOIN sales_transactions st ON u.id = st.cashier_id AND st.status != 'Cancelled'
         WHERE u.role IN ('sales', 'cashier', 'manager')
@@ -955,6 +971,7 @@ router.get('/staff-performance', async (req, res) => {
             total_cogs: parseFloat(staff.total_cogs),
             avg_transaction_value: parseFloat(staff.avg_transaction_value),
             total_discounts_given: parseFloat(staff.total_discounts_given),
+            period_label: staff.period_label,
             profit_margin_percentage: staff.total_sales > 0 ? (staff.total_profit / staff.total_sales * 100) : 0
         }));
 
@@ -1086,7 +1103,7 @@ router.get('/branch-performance', async (req, res) => {
     }
 });
 
-// GET /api/analysis/stock-issues - Analyze stock issues and transfers
+// GET /api/analysis/stock-issues - Analyze stock issues and transfers - UPDATED with complete data
 router.get('/stock-issues', async (req, res) => {
     const { startDate, endDate, issueType, productId, branchId, limit = 10 } = req.query;
     
@@ -1099,12 +1116,15 @@ router.get('/stock-issues', async (req, res) => {
             u_from.fullname AS from_user,
             u_to.fullname AS to_user,
             u_recorded.fullname AS recorded_by,
-            sil.note
+            sil.note,
+            b.name AS branch_name,
+            (SUM(sil.quantity_changed) * p.price) AS total_value
         FROM stock_issue_log sil
         JOIN products p ON sil.product_id = p.id
         LEFT JOIN users u_from ON sil.from_user_id = u_from.id
         LEFT JOIN users u_to ON sil.to_user_id = u_to.id
         JOIN users u_recorded ON sil.recorded_by = u_recorded.id
+        LEFT JOIN branches b ON u_recorded.id = b.id
         WHERE 1=1
     `;
     let params = [];
@@ -1120,10 +1140,14 @@ router.get('/stock-issues', async (req, res) => {
         query += ` AND sil.product_id = $${paramIndex++}`;
         params.push(parseInt(productId));
     }
+    if (branchId) {
+        query += ` AND b.id = $${paramIndex++}`;
+        params.push(parseInt(branchId));
+    }
 
     query += `
         GROUP BY sil.issue_type, p.name, TO_CHAR(sil.created_at, 'YYYY-MM'), 
-                 u_from.fullname, u_to.fullname, u_recorded.fullname, sil.note
+                 u_from.fullname, u_to.fullname, u_recorded.fullname, sil.note, b.name, p.price
         ORDER BY period_label DESC, total_quantity DESC
     `;
 
@@ -1141,7 +1165,7 @@ router.get('/stock-issues', async (req, res) => {
     }
 });
 
-// GET /api/analysis/waste-analysis - Comprehensive waste analysis
+// GET /api/analysis/waste-analysis - Comprehensive waste analysis - UPDATED with complete data
 router.get('/waste-analysis', async (req, res) => {
     const { startDate, endDate, productId, branchId, limit = 10 } = req.query;
     
@@ -1150,7 +1174,7 @@ router.get('/waste-analysis', async (req, res) => {
             p.name AS product_name,
             SUM(ws.quantity) AS total_waste_quantity,
             TO_CHAR(ws.date_recorded, 'YYYY-MM') AS period_label,
-            ws.reason,
+            ws.reason AS waste_reason,
             u.fullname AS recorded_by,
             (SUM(ws.quantity) * p.price) AS waste_value
         FROM waste_stock ws
