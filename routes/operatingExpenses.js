@@ -2,6 +2,10 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db/db');
+const authenticate = require('../middleware/authenticate'); // Import your auth middleware
+
+// Apply authentication to all routes
+router.use(authenticate);
 
 // GET /api/operating-expenses - Get all operating expenses with filters
 router.get('/', async (req, res) => {
@@ -12,7 +16,7 @@ router.get('/', async (req, res) => {
             category,
             expenseType,
             paymentMethod,
-            viewType = 'all', // 'daily', 'weekly', 'monthly', 'custom', 'all'
+            viewType = 'all',
             page = 1,
             limit = 50
         } = req.query;
@@ -225,12 +229,18 @@ router.post('/', async (req, res) => {
         category,
         payment_method,
         reference_number,
-        recorded_by,
         is_recurring,
         recurrence_pattern
     } = req.body;
 
     try {
+        // Validate required fields
+        if (!expense_type || !amount || !category) {
+            return res.status(400).json({ 
+                error: 'Missing required fields: expense_type, amount, and category are required.' 
+            });
+        }
+
         const result = await db.query(`
             INSERT INTO operating_expenses (
                 expense_date, expense_type, description, amount, category,
@@ -241,11 +251,11 @@ router.post('/', async (req, res) => {
             expense_date || new Date(),
             expense_type,
             description,
-            amount,
+            parseFloat(amount),
             category,
             payment_method || 'Cash',
             reference_number,
-            recorded_by,
+            req.user.id, // Use the authenticated user's ID
             is_recurring || false,
             recurrence_pattern
         ]);
@@ -253,7 +263,10 @@ router.post('/', async (req, res) => {
         res.status(201).json(result.rows[0]);
     } catch (error) {
         console.error('Error creating expense:', error);
-        res.status(500).json({ error: 'Failed to create expense.', details: error.message });
+        res.status(500).json({ 
+            error: 'Failed to create expense.', 
+            details: error.message 
+        });
     }
 });
 
@@ -273,6 +286,16 @@ router.put('/:id', async (req, res) => {
     } = req.body;
 
     try {
+        // First, check if the expense exists and belongs to the user (optional security)
+        const existingExpense = await db.query(
+            'SELECT * FROM operating_expenses WHERE id = $1',
+            [id]
+        );
+
+        if (existingExpense.rows.length === 0) {
+            return res.status(404).json({ error: 'Expense not found.' });
+        }
+
         const result = await db.query(`
             UPDATE operating_expenses 
             SET expense_date = $1, expense_type = $2, description = $3, amount = $4,
@@ -292,10 +315,6 @@ router.put('/:id', async (req, res) => {
             recurrence_pattern,
             id
         ]);
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({ error: 'Expense not found.' });
-        }
 
         res.status(200).json(result.rows[0]);
     } catch (error) {
