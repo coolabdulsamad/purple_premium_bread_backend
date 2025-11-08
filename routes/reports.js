@@ -319,7 +319,7 @@ router.get('/discount-analysis', async (req, res) => {
     }
 });
 
-// Exchange Requests Report
+// Enhanced Exchange Requests Report with Product Names
 router.get('/exchange-requests', async (req, res) => {
     const { startDate, endDate, customerId, status } = req.query;
 
@@ -360,22 +360,83 @@ router.get('/exchange-requests', async (req, res) => {
     try {
         const result = await db.query(query, params);
         
-        // Process the items_requested_jsonb to include product names
-        const processedData = result.rows.map(row => {
-            let itemsDisplay = 'N/A';
+        // Get all product IDs from the exchange requests to fetch product names
+        const productIds = new Set();
+        
+        result.rows.forEach(row => {
             if (row.items_requested_jsonb && Array.isArray(row.items_requested_jsonb)) {
-                itemsDisplay = row.items_requested_jsonb.map(item => {
-                    const productName = item.product_name || `Product ID: ${item.product_id}`;
-                    return `${productName} (Qty: ${item.quantity || 0})`;
-                }).join(', ');
+                row.items_requested_jsonb.forEach(item => {
+                    if (item.product_id) {
+                        productIds.add(item.product_id);
+                    }
+                });
             } else if (typeof row.items_requested_jsonb === 'string') {
                 try {
                     const parsedItems = JSON.parse(row.items_requested_jsonb);
                     if (Array.isArray(parsedItems)) {
-                        itemsDisplay = parsedItems.map(item => {
-                            const productName = item.product_name || `Product ID: ${item.product_id}`;
-                            return `${productName} (Qty: ${item.quantity || 0})`;
-                        }).join(', ');
+                        parsedItems.forEach(item => {
+                            if (item.product_id) {
+                                productIds.add(item.product_id);
+                            }
+                        });
+                    }
+                } catch (e) {
+                    console.error('Error parsing JSON:', e);
+                }
+            }
+        });
+
+        // Fetch product names for all product IDs
+        let productsMap = new Map();
+        if (productIds.size > 0) {
+            const productIdsArray = Array.from(productIds);
+            const placeholders = productIdsArray.map((_, index) => `$${index + 1}`).join(',');
+            
+            const productsQuery = `
+                SELECT id, name 
+                FROM products 
+                WHERE id IN (${placeholders})
+            `;
+            
+            const productsResult = await db.query(productsQuery, productIdsArray);
+            productsResult.rows.forEach(product => {
+                productsMap.set(product.id, product.name);
+            });
+        }
+
+        // Process the items_requested_jsonb to include product names
+        const processedData = result.rows.map(row => {
+            let itemsDisplay = 'N/A';
+            let itemsWithNames = [];
+            
+            if (row.items_requested_jsonb && Array.isArray(row.items_requested_jsonb)) {
+                itemsWithNames = row.items_requested_jsonb.map(item => {
+                    const productName = productsMap.get(item.product_id) || `Product ID: ${item.product_id}`;
+                    return {
+                        ...item,
+                        product_name: productName
+                    };
+                });
+                
+                itemsDisplay = itemsWithNames.map(item => 
+                    `${item.product_name} (Qty: ${item.quantity || 0})`
+                ).join(', ');
+                
+            } else if (typeof row.items_requested_jsonb === 'string') {
+                try {
+                    const parsedItems = JSON.parse(row.items_requested_jsonb);
+                    if (Array.isArray(parsedItems)) {
+                        itemsWithNames = parsedItems.map(item => {
+                            const productName = productsMap.get(item.product_id) || `Product ID: ${item.product_id}`;
+                            return {
+                                ...item,
+                                product_name: productName
+                            };
+                        });
+                        
+                        itemsDisplay = itemsWithNames.map(item => 
+                            `${item.product_name} (Qty: ${item.quantity || 0})`
+                        ).join(', ');
                     }
                 } catch (e) {
                     itemsDisplay = 'Invalid JSON format';
@@ -384,7 +445,8 @@ router.get('/exchange-requests', async (req, res) => {
             
             return {
                 ...row,
-                items_display: itemsDisplay
+                items_display: itemsDisplay,
+                items_with_names: itemsWithNames // Include detailed items with names for frontend
             };
         });
 
