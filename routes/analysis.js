@@ -602,7 +602,7 @@ router.get('/customer-lifetime-value', async (req, res) => {
     }
 });
 
-// GET /api/analysis/free-items - Analyze free items given - UPDATED with complete data
+// GET /api/analysis/free-items - FIXED VERSION
 router.get('/free-items', async (req, res) => {
     const { startDate, endDate, productId, branchId, limit = 10 } = req.query;
     
@@ -617,15 +617,18 @@ router.get('/free-items', async (req, res) => {
             CASE 
                 WHEN (SELECT COALESCE(SUM(si.quantity), 1) FROM sales_items si 
                       JOIN sales_transactions st ON si.sale_id = st.id 
-                      WHERE st.status != 'Cancelled' AND si.product_id = p.id) > 0 THEN
+                      WHERE st.status != 'Cancelled' AND si.product_id = p.id
+                      ${startDate ? ` AND st.sale_date >= '${startDate}'` : ''}
+                      ${endDate ? ` AND st.sale_date <= '${endDate}'` : ''}) > 0 THEN
                     (SUM(fsl.quantity) / (SELECT COALESCE(SUM(si.quantity), 1) FROM sales_items si 
                                          JOIN sales_transactions st ON si.sale_id = st.id 
-                                         WHERE st.status != 'Cancelled' AND si.product_id = p.id)) * 100
+                                         WHERE st.status != 'Cancelled' AND si.product_id = p.id
+                                         ${startDate ? ` AND st.sale_date >= '${startDate}'` : ''}
+                                         ${endDate ? ` AND st.sale_date <= '${endDate}'` : ''})) * 100
                 ELSE 0
             END AS free_percentage
         FROM free_stock_log fsl
         JOIN products p ON fsl.product_id = p.id
-        JOIN sales_transactions st ON fsl.sale_id = st.id
         JOIN users u ON fsl.recorded_by = u.id
         WHERE 1=1
     `;
@@ -639,7 +642,10 @@ router.get('/free-items', async (req, res) => {
         params.push(parseInt(productId));
     }
     if (branchId) {
-        query += ` AND st.branch_id = $${paramIndex++}`;
+        query += ` AND EXISTS (
+            SELECT 1 FROM sales_transactions st 
+            WHERE st.id = fsl.sale_id AND st.branch_id = $${paramIndex++}
+        )`;
         params.push(parseInt(branchId));
     }
 
@@ -705,7 +711,7 @@ router.get('/discounts', async (req, res) => {
     }
 });
 
-// GET /api/analysis/exchanges - Analyze bread exchanges - UPDATED with complete data
+// GET /api/analysis/exchanges - FIXED VERSION
 router.get('/exchanges', async (req, res) => {
     const { startDate, endDate, status, branchId, limit = 10 } = req.query;
     
@@ -716,15 +722,26 @@ router.get('/exchanges', async (req, res) => {
             TO_CHAR(er.created_at, 'YYYY-MM') AS period_label,
             c.fullname AS customer_name,
             u.fullname AS requested_by,
-            p.name AS product_name,
-            (er.items_requested_jsonb->0->>'quantity')::integer AS exchange_quantity,
-            ((er.items_requested_jsonb->0->>'quantity')::integer * p.price) AS exchange_value,
+            COALESCE(
+                (SELECT p.name FROM products p 
+                 WHERE p.id = (er.items_requested_jsonb->0->>'productId')::integer),
+                'Unknown Product'
+            ) AS product_name,
+            COALESCE(
+                (er.items_requested_jsonb->0->>'quantity')::integer,
+                0
+            ) AS exchange_quantity,
+            COALESCE(
+                (er.items_requested_jsonb->0->>'quantity')::integer * 
+                (SELECT p.price FROM products p 
+                 WHERE p.id = (er.items_requested_jsonb->0->>'productId')::integer),
+                0
+            ) AS exchange_value,
             er.reason AS exchange_reason
         FROM exchange_requests er
         JOIN customers c ON er.customer_id = c.id
         JOIN users u ON er.requested_by_user_id = u.id
-        JOIN sales_transactions st ON er.original_sale_id = st.id
-        JOIN products p ON (er.items_requested_jsonb->0->>'productId')::integer = p.id
+        LEFT JOIN sales_transactions st ON er.original_sale_id = st.id
         WHERE 1=1
     `;
     let params = [];
@@ -743,7 +760,7 @@ router.get('/exchanges', async (req, res) => {
 
     query += `
         GROUP BY er.status, TO_CHAR(er.created_at, 'YYYY-MM'), c.fullname, u.fullname, 
-                 p.name, er.items_requested_jsonb, er.reason
+                 er.items_requested_jsonb, er.reason
         ORDER BY period_label DESC, total_exchanges DESC
     `;
 
@@ -761,7 +778,7 @@ router.get('/exchanges', async (req, res) => {
     }
 });
 
-// GET /api/analysis/stock-allocation - Analyze stock allocation to sales users - UPDATED with complete data
+// GET /api/analysis/stock-allocation - FIXED VERSION
 router.get('/stock-allocation', async (req, res) => {
     const { userId, productId, branchId, limit = 10 } = req.query;
     
@@ -772,7 +789,7 @@ router.get('/stock-allocation', async (req, res) => {
             p.name AS product_name,
             sus.quantity AS allocated_quantity,
             sus.last_updated AS allocation_date,
-            b.name AS branch_name,
+            COALESCE(b.name, 'Main Branch') AS branch_name,
             (sus.quantity * p.price) AS stock_value,
             CASE 
                 WHEN sus.quantity > 0 THEN 'Active'
