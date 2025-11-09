@@ -741,7 +741,7 @@ router.get('/exchanges', async (req, res) => {
             u.fullname AS requested_by,
             COALESCE(
                 (SELECT p.name FROM products p 
-                 WHERE p.id = (er.items_requested_jsonb->0->>'productId')::integer),
+                 WHERE p.id = (er.items_requested_jsonb->0->>'product_id')::integer),
                 'Unknown Product'
             ) AS product_name,
             COALESCE(
