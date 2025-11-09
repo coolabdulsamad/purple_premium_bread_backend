@@ -602,11 +602,22 @@ router.get('/customer-lifetime-value', async (req, res) => {
     }
 });
 
-// GET /api/analysis/free-items - FIXED VERSION
+// GET /api/analysis/free-items - COMPLETELY FIXED VERSION
 router.get('/free-items', async (req, res) => {
     const { startDate, endDate, productId, branchId, limit = 10 } = req.query;
     
     let query = `
+        WITH sales_totals AS (
+            SELECT 
+                si.product_id,
+                COALESCE(SUM(si.quantity), 0) as total_sold
+            FROM sales_items si
+            JOIN sales_transactions st ON si.sale_id = st.id
+            WHERE st.status != 'Cancelled'
+            ${startDate ? ` AND st.sale_date >= '${startDate}'` : ''}
+            ${endDate ? ` AND st.sale_date <= '${endDate}'` : ''}
+            GROUP BY si.product_id
+        )
         SELECT 
             p.name AS product_name,
             SUM(fsl.quantity) AS total_quantity,
@@ -615,27 +626,30 @@ router.get('/free-items', async (req, res) => {
             u.fullname AS recorded_by_name,
             (SUM(fsl.quantity) * p.price) AS total_free_value,
             CASE 
-                WHEN (SELECT COALESCE(SUM(si.quantity), 1) FROM sales_items si 
-                      JOIN sales_transactions st ON si.sale_id = st.id 
-                      WHERE st.status != 'Cancelled' AND si.product_id = p.id
-                      ${startDate ? ` AND st.sale_date >= '${startDate}'` : ''}
-                      ${endDate ? ` AND st.sale_date <= '${endDate}'` : ''}) > 0 THEN
-                    (SUM(fsl.quantity) / (SELECT COALESCE(SUM(si.quantity), 1) FROM sales_items si 
-                                         JOIN sales_transactions st ON si.sale_id = st.id 
-                                         WHERE st.status != 'Cancelled' AND si.product_id = p.id
-                                         ${startDate ? ` AND st.sale_date >= '${startDate}'` : ''}
-                                         ${endDate ? ` AND st.sale_date <= '${endDate}'` : ''})) * 100
+                WHEN COALESCE(st.total_sold, 0) > 0 THEN
+                    (SUM(fsl.quantity) / st.total_sold) * 100
                 ELSE 0
             END AS free_percentage
         FROM free_stock_log fsl
         JOIN products p ON fsl.product_id = p.id
         JOIN users u ON fsl.recorded_by = u.id
+        LEFT JOIN sales_totals st ON p.id = st.product_id
         WHERE 1=1
     `;
     let params = [];
     let paramIndex = 1;
 
-    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'fsl.recorded_at'));
+    // Apply date filters
+    if (startDate) {
+        query += ` AND fsl.recorded_at >= $${paramIndex++}`;
+        params.push(startDate);
+    }
+    if (endDate) {
+        const endOfDay = new Date(endDate);
+        endOfDay.setDate(endOfDay.getDate() + 1);
+        query += ` AND fsl.recorded_at < $${paramIndex++}`;
+        params.push(endOfDay.toISOString());
+    }
 
     if (productId) {
         query += ` AND fsl.product_id = $${paramIndex++}`;
@@ -650,11 +664,14 @@ router.get('/free-items', async (req, res) => {
     }
 
     query += `
-        GROUP BY p.name, fsl.reason, TO_CHAR(fsl.recorded_at, 'YYYY-MM'), u.fullname, p.price
+        GROUP BY p.name, fsl.reason, TO_CHAR(fsl.recorded_at, 'YYYY-MM'), u.fullname, p.price, st.total_sold
         ORDER BY total_quantity DESC
     `;
 
-    ({ query, params, paramIndex } = applyLimit(query, params, paramIndex, limit));
+    if (limit && limit > 0) {
+        query += ` LIMIT $${paramIndex++}`;
+        params.push(parseInt(limit));
+    }
 
     try {
         const result = await db.query(query, params);
@@ -711,7 +728,7 @@ router.get('/discounts', async (req, res) => {
     }
 });
 
-// GET /api/analysis/exchanges - FIXED VERSION
+// GET /api/analysis/exchanges - COMPLETELY FIXED VERSION
 router.get('/exchanges', async (req, res) => {
     const { startDate, endDate, status, branchId, limit = 10 } = req.query;
     
@@ -747,7 +764,17 @@ router.get('/exchanges', async (req, res) => {
     let params = [];
     let paramIndex = 1;
 
-    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'er.created_at'));
+    // Apply date filters
+    if (startDate) {
+        query += ` AND er.created_at >= $${paramIndex++}`;
+        params.push(startDate);
+    }
+    if (endDate) {
+        const endOfDay = new Date(endDate);
+        endOfDay.setDate(endOfDay.getDate() + 1);
+        query += ` AND er.created_at < $${paramIndex++}`;
+        params.push(endOfDay.toISOString());
+    }
 
     if (status) {
         query += ` AND er.status = $${paramIndex++}`;
@@ -759,12 +786,20 @@ router.get('/exchanges', async (req, res) => {
     }
 
     query += `
-        GROUP BY er.status, TO_CHAR(er.created_at, 'YYYY-MM'), c.fullname, u.fullname, 
-                 er.items_requested_jsonb, er.reason
+        GROUP BY 
+            er.status, 
+            TO_CHAR(er.created_at, 'YYYY-MM'), 
+            c.fullname, 
+            u.fullname, 
+            er.items_requested_jsonb, 
+            er.reason
         ORDER BY period_label DESC, total_exchanges DESC
     `;
 
-    ({ query, params, paramIndex } = applyLimit(query, params, paramIndex, limit));
+    if (limit && limit > 0) {
+        query += ` LIMIT $${paramIndex++}`;
+        params.push(parseInt(limit));
+    }
 
     try {
         const result = await db.query(query, params);
@@ -878,24 +913,60 @@ router.get('/salaries', async (req, res) => {
     }
 });
 
-// GET /api/analysis/operating-expenses - Analyze operating expenses
+// GET /api/analysis/operating-expenses - FIXED VERSION
 router.get('/operating-expenses', async (req, res) => {
     const { startDate, endDate, category, branchId, limit = 10 } = req.query;
     
     let query = `
+        WITH total_expenses AS (
+            SELECT COALESCE(SUM(amount), 0) as total
+            FROM operating_expenses
+            WHERE 1=1
+    `;
+    let totalExpensesParams = [];
+    let totalParamIndex = 1;
+
+    // Apply date filters for total calculation
+    if (startDate) {
+        query += ` AND expense_date >= $${totalParamIndex++}`;
+        totalExpensesParams.push(startDate);
+    }
+    if (endDate) {
+        const endOfDay = new Date(endDate);
+        endOfDay.setDate(endOfDay.getDate() + 1);
+        query += ` AND expense_date < $${totalParamIndex++}`;
+        totalExpensesParams.push(endOfDay.toISOString());
+    }
+
+    query += `
+        )
         SELECT 
             oe.category,
             SUM(oe.amount) AS total_amount,
             TO_CHAR(oe.expense_date, 'YYYY-MM') AS period_label,
             COUNT(oe.id) AS total_expenses,
-            (SUM(oe.amount) / NULLIF((SELECT COALESCE(SUM(amount), 1) FROM operating_expenses WHERE 1=1), 0)) * 100 AS percentage
+            CASE 
+                WHEN (SELECT total FROM total_expenses) > 0 THEN
+                    (SUM(oe.amount) / (SELECT total FROM total_expenses)) * 100
+                ELSE 0
+            END AS percentage
         FROM operating_expenses oe
         WHERE 1=1
     `;
-    let params = [];
-    let paramIndex = 1;
+    let params = [...totalExpensesParams];
+    let paramIndex = totalParamIndex;
 
-    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'oe.expense_date'));
+    // Apply date filters for main query
+    if (startDate) {
+        query += ` AND oe.expense_date >= $${paramIndex++}`;
+        params.push(startDate);
+    }
+    if (endDate) {
+        const endOfDay = new Date(endDate);
+        endOfDay.setDate(endOfDay.getDate() + 1);
+        query += ` AND oe.expense_date < $${paramIndex++}`;
+        params.push(endOfDay.toISOString());
+    }
 
     if (category) {
         query += ` AND oe.category = $${paramIndex++}`;
@@ -911,7 +982,10 @@ router.get('/operating-expenses', async (req, res) => {
         ORDER BY total_amount DESC
     `;
 
-    ({ query, params, paramIndex } = applyLimit(query, params, paramIndex, limit));
+    if (limit && limit > 0) {
+        query += ` LIMIT $${paramIndex++}`;
+        params.push(parseInt(limit));
+    }
 
     try {
         const result = await db.query(query, params);
