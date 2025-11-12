@@ -75,14 +75,16 @@ router.post('/upload-receipt', async (req, res) => {
     }
 });
 
-// POST /api/sales/process - Process a sale (UPDATED & FIXED FOR FOR UPDATE ERROR)
+// POST /api/sales/process - Process a sale (UPDATED with Advantage Sale Support)
 router.post('/process', async (req, res) => {
     const {
         cart, subtotal, tax, total, discountAmount,
         cashierId, paymentMethod, customerId, note,
         paymentReference, paymentImageUrl, status,
         amountPaid, balanceDue, dueDate,
-        freeStock // NEW: The free stock object from the frontend
+        freeStock, // The free stock object from the frontend
+        // NEW: Advantage sale fields
+        isAdvantageSale, advantageTotal, baseSubtotal
     } = req.body;
 
     const client = await db.pool.connect();
@@ -178,18 +180,19 @@ router.post('/process', async (req, res) => {
         }
 
         // --- STEP 4: Record the Sale ---
-        // **UPDATED QUERY: Added total_profit and adjusted placeholders**
+        // **UPDATED QUERY: Added advantage sale columns**
         const saleInsertQuery = `
-    INSERT INTO sales_transactions (
-        subtotal, tax_amount, total_amount, discount_amount, cashier_id, 
-        payment_method, customer_id, note, payment_reference, 
-        payment_image_url, status, amount_paid, balance_due, due_date, 
-        total_cogs, total_profit, stock_source, stock_source_user_id 
-    )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 
-            $11, $12, $13, $14, $15, $16, $17, $18) 
-    RETURNING id;
-`;
+            INSERT INTO sales_transactions (
+                subtotal, tax_amount, total_amount, discount_amount, cashier_id, 
+                payment_method, customer_id, note, payment_reference, 
+                payment_image_url, status, amount_paid, balance_due, due_date, 
+                total_cogs, total_profit, stock_source, stock_source_user_id,
+                is_advantage_sale, advantage_total, base_subtotal
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 
+                    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) 
+            RETURNING id;
+        `;
 
         // Determine stock source
         let stockSource = 'main_inventory';
@@ -200,20 +203,29 @@ router.post('/process', async (req, res) => {
             stockSourceUserId = cashierId;
         }
 
-        // **UPDATED PARAMS: Included totalProfit**
+        // **UPDATED PARAMS: Included advantage sale data**
         const saleResult = await client.query(saleInsertQuery, [
             subtotal, tax, total, discountAmount, cashierId,
             paymentMethod, customerId, note, paymentReference,
             paymentImageUrl, status, amountPaid, balanceDue, dueDate,
-            totalCogs, totalProfit, stockSource, stockSourceUserId
+            totalCogs, totalProfit, stockSource, stockSourceUserId,
+            // NEW: Advantage sale parameters
+            isAdvantageSale || false,
+            advantageTotal || 0,
+            baseSubtotal || subtotal
         ]);
         const saleId = saleResult.rows[0].id;
 
         // --- STEP 5: Record Sale Items ---
+        // **UPDATED QUERY: Added advantage_amount and final_price columns**
         const itemsInsertQuery = `
-            INSERT INTO sales_items (sale_id, product_id, quantity, price_at_sale, discount_applied)
-            VALUES ($1, $2, $3, $4, $5);
+            INSERT INTO sales_items (
+                sale_id, product_id, quantity, price_at_sale, discount_applied,
+                advantage_amount, final_price
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7);
         `;
+        
         // Get discount percentage from the frontend payload if available
         let discountPercent = 0;
         if (discountAmount && subtotal > 0) {
@@ -221,17 +233,22 @@ router.post('/process', async (req, res) => {
         }
 
         for (const item of cart) {
+            // Extract advantage amount and final price from item data
+            const advantageAmount = item.advantageAmount || 0;
+            const finalPrice = item.finalPrice || item.price;
+            
             await client.query(itemsInsertQuery, [
                 saleId,
                 item.id,
                 item.quantity,
-                item.price,
-                discountPercent.toFixed(2) // Save as e.g., 10.00 (%)
+                item.price, // Original base price
+                discountPercent.toFixed(2), // Save as e.g., 10.00 (%)
+                advantageAmount, // Extra amount added for advantage sale
+                finalPrice // Final price charged (base price + advantage amount)
             ]);
         }
 
-
-        // --- STEP 5: Deduct Stock (Sold + FREE) ---
+        // --- STEP 6: Deduct Stock (Sold + FREE) ---
         for (const [productId, quantityToDeduct] of Object.entries(productsToUpdate)) {
             let updateParams = [quantityToDeduct, productId];
             if (stockTable === 'sales_user_stock') {
@@ -243,23 +260,23 @@ router.post('/process', async (req, res) => {
             if (updateResult.rowCount === 0 && stockTable === 'sales_user_stock') {
                 // Attempt to create a missing record (fallback safeguard)
                 const insertQuery = `
-            INSERT INTO sales_user_stock (user_id, product_id, quantity)
-            VALUES ($1, $2, -($3))
-            ON CONFLICT (user_id, product_id) DO UPDATE
-            SET quantity = sales_user_stock.quantity - EXCLUDED.quantity
-            RETURNING *;
-        `;
+                    INSERT INTO sales_user_stock (user_id, product_id, quantity)
+                    VALUES ($1, $2, -($3))
+                    ON CONFLICT (user_id, product_id) DO UPDATE
+                    SET quantity = sales_user_stock.quantity - EXCLUDED.quantity
+                    RETURNING *;
+                `;
                 await client.query(insertQuery, [cashierId, productId, quantityToDeduct]);
             }
         }
 
-        // --- STEP 6: Log Free Stock + Confirm Deduction ---
+        // --- STEP 7: Log Free Stock + Confirm Deduction ---
         if (freeStock && freeStock.quantities) {
             const { quantities, reason } = freeStock;
             const logQuery = `
-        INSERT INTO free_stock_log (sale_id, product_id, quantity, reason, recorded_by)
-        VALUES ($1, $2, $3, $4, $5);
-    `;
+                INSERT INTO free_stock_log (sale_id, product_id, quantity, reason, recorded_by)
+                VALUES ($1, $2, $3, $4, $5);
+            `;
 
             for (const [productIdStr, quantity] of Object.entries(quantities)) {
                 const productId = parseInt(productIdStr);
@@ -271,15 +288,14 @@ router.post('/process', async (req, res) => {
                     if (stockTable !== 'sales_user_stock') {
                         await client.query(
                             `UPDATE inventory
-                     SET quantity = quantity - $1, last_updated = NOW()
-                     WHERE product_id = $2;`,
+                             SET quantity = quantity - $1, last_updated = NOW()
+                             WHERE product_id = $2;`,
                             [quantity, productId]
                         );
                     }
                 }
             }
         }
-
 
         await client.query('COMMIT');
         res.status(201).json({ message: 'Sale processed successfully', saleId });
