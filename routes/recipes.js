@@ -73,42 +73,45 @@ router.get('/:productId/:rawMaterialId', async (req, res) => {
 });
 
 
-// POST /api/recipes - Add a raw material to a product's recipe
+// In your POST route - ensure proper precision handling
 router.post('/', async (req, res) => {
-    // Expecting product_id, raw_material_id, and quantity_required (per-product unit)
     const { product_id, raw_material_id, quantity_required } = req.body;
+    
     try {
-        // Note: cost_per_unit is no longer stored in the recipes table
-        // It will be derived dynamically from raw_materials.restock_price_per_unit when fetched.
-
+        // Parse and ensure proper precision
+        const preciseQuantity = parseFloat(parseFloat(quantity_required).toFixed(6));
+        
         const result = await db.query(
             `INSERT INTO recipes (product_id, raw_material_id, quantity_required)
              VALUES ($1, $2, $3)
              RETURNING *`,
-            [product_id, raw_material_id, quantity_required]
+            [product_id, raw_material_id, preciseQuantity]
         );
         res.status(201).json(result.rows[0]);
     } catch (error) {
         console.error('Error adding raw material to recipe:', error);
-        if (error.code === '23505') { // Unique violation for (product_id, raw_material_id)
+        if (error.code === '23505') {
             return res.status(409).json({ error: 'This raw material is already in the recipe for this product. Please edit instead.' });
         }
         res.status(500).json({ error: 'Failed to add raw material to recipe.', details: error.message });
     }
 });
 
-// PUT /api/recipes/:productId/:rawMaterialId - Update quantity_required for a recipe item
+// In your PUT route
 router.put('/:productId/:rawMaterialId', async (req, res) => {
     const { productId, rawMaterialId } = req.params;
     const { quantity_required } = req.body;
+    
     try {
-        // Only update quantity_required as cost_per_unit is no longer stored here
+        // Ensure precision
+        const preciseQuantity = parseFloat(parseFloat(quantity_required).toFixed(6));
+        
         const result = await db.query(
             `UPDATE recipes
-             SET quantity_required = $1 -- , updated_at = NOW() -- Assuming an updated_at column in recipes if you added it
+             SET quantity_required = $1
              WHERE product_id = $2 AND raw_material_id = $3
              RETURNING *`,
-            [quantity_required, productId, rawMaterialId]
+            [preciseQuantity, productId, rawMaterialId]
         );
         if (result.rows.length === 0) {
             return res.status(404).json({ message: 'Recipe item not found.' });
