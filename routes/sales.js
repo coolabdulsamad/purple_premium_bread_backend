@@ -87,6 +87,18 @@ router.post('/process', async (req, res) => {
         isAdvantageSale, advantageTotal, baseSubtotal
     } = req.body;
 
+    console.log('Advantage Sale Data Received:', {
+        isAdvantageSale,
+        advantageTotal,
+        baseSubtotal,
+        cartItems: cart.map(item => ({
+            id: item.id,
+            price: item.price,
+            advantageAmount: item.advantageAmount,
+            finalPrice: item.finalPrice
+        }))
+    });
+
     const client = await db.pool.connect();
     try {
         await client.query('BEGIN');
@@ -129,7 +141,7 @@ router.post('/process', async (req, res) => {
         }
 
         // --- STEP 2: Aggregate All Products (Sold + Free) and Pre-check Stock ---
-        const productsToUpdate = {}; // { productId: totalQuantityToDeduct (sold + free) }
+        const productsToUpdate = {};
         let totalCogs = 0;
 
         // Add sold items
@@ -143,10 +155,7 @@ router.post('/process', async (req, res) => {
             totalCogs += cogsPerUnit * quantity;
         }
         
-        // **NEW CALCULATION**
-        const totalProfit = total - totalCogs; 
-        // **END NEW CALCULATION**
-
+        const totalProfit = total - totalCogs;
 
         // Add free items (if applicable)
         if (freeStock && freeStock.quantities) {
@@ -169,10 +178,8 @@ router.post('/process', async (req, res) => {
             const availableStock = checkResult.rows[0]?.quantity || 0;
 
             if (quantityToDeduct > availableStock) {
-                // Fetch product name for better error message
                 const product = await client.query('SELECT name FROM products WHERE id = $1', [productId]);
                 const productName = product.rows[0]?.name || `Product ID ${productId}`;
-
                 throw new Error(
                     `Insufficient stock for ${productName} in ${stockTable}. Needed: ${quantityToDeduct}, Available: ${availableStock}`
                 );
@@ -180,7 +187,6 @@ router.post('/process', async (req, res) => {
         }
 
         // --- STEP 4: Record the Sale ---
-        // **UPDATED QUERY: Added advantage sale columns**
         const saleInsertQuery = `
             INSERT INTO sales_transactions (
                 subtotal, tax_amount, total_amount, discount_amount, cashier_id, 
@@ -203,7 +209,6 @@ router.post('/process', async (req, res) => {
             stockSourceUserId = cashierId;
         }
 
-        // **UPDATED PARAMS: Included advantage sale data**
         const saleResult = await client.query(saleInsertQuery, [
             subtotal, tax, total, discountAmount, cashierId,
             paymentMethod, customerId, note, paymentReference,
@@ -217,7 +222,6 @@ router.post('/process', async (req, res) => {
         const saleId = saleResult.rows[0].id;
 
         // --- STEP 5: Record Sale Items ---
-        // **UPDATED QUERY: Added advantage_amount and final_price columns**
         const itemsInsertQuery = `
             INSERT INTO sales_items (
                 sale_id, product_id, quantity, price_at_sale, discount_applied,
@@ -226,7 +230,7 @@ router.post('/process', async (req, res) => {
             VALUES ($1, $2, $3, $4, $5, $6, $7);
         `;
         
-        // Get discount percentage from the frontend payload if available
+        // Get discount percentage
         let discountPercent = 0;
         if (discountAmount && subtotal > 0) {
             discountPercent = (discountAmount / subtotal) * 100;
@@ -236,19 +240,20 @@ router.post('/process', async (req, res) => {
             // Extract advantage amount and final price from item data
             const advantageAmount = item.advantageAmount || 0;
             const finalPrice = item.finalPrice || item.price;
+            const basePrice = item.price; // Original price
             
             await client.query(itemsInsertQuery, [
                 saleId,
                 item.id,
                 item.quantity,
-                item.price, // Original base price
-                discountPercent.toFixed(2), // Save as e.g., 10.00 (%)
+                basePrice, // Original base price
+                discountPercent.toFixed(2),
                 advantageAmount, // Extra amount added for advantage sale
                 finalPrice // Final price charged (base price + advantage amount)
             ]);
         }
 
-        // --- STEP 6: Deduct Stock (Sold + FREE) ---
+        // --- STEP 6: Deduct Stock ---
         for (const [productId, quantityToDeduct] of Object.entries(productsToUpdate)) {
             let updateParams = [quantityToDeduct, productId];
             if (stockTable === 'sales_user_stock') {
@@ -258,7 +263,6 @@ router.post('/process', async (req, res) => {
             const updateResult = await client.query(stockUpdateQuery, updateParams);
 
             if (updateResult.rowCount === 0 && stockTable === 'sales_user_stock') {
-                // Attempt to create a missing record (fallback safeguard)
                 const insertQuery = `
                     INSERT INTO sales_user_stock (user_id, product_id, quantity)
                     VALUES ($1, $2, -($3))
@@ -270,7 +274,7 @@ router.post('/process', async (req, res) => {
             }
         }
 
-        // --- STEP 7: Log Free Stock + Confirm Deduction ---
+        // --- STEP 7: Log Free Stock ---
         if (freeStock && freeStock.quantities) {
             const { quantities, reason } = freeStock;
             const logQuery = `
@@ -281,10 +285,8 @@ router.post('/process', async (req, res) => {
             for (const [productIdStr, quantity] of Object.entries(quantities)) {
                 const productId = parseInt(productIdStr);
                 if (quantity > 0) {
-                    // Log it
                     await client.query(logQuery, [saleId, productId, quantity, reason, cashierId]);
 
-                    // Also reduce free items explicitly from main inventory if sales_user_stock was used
                     if (stockTable !== 'sales_user_stock') {
                         await client.query(
                             `UPDATE inventory
@@ -308,7 +310,6 @@ router.post('/process', async (req, res) => {
         client.release();
     }
 });
-
 
 // GET /api/sales - Get all sales transactions with enhanced filters
 router.get('/', async (req, res) => {
