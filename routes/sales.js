@@ -75,7 +75,7 @@ router.post('/upload-receipt', async (req, res) => {
     }
 });
 
-// POST /api/sales/process - Process a sale (UPDATED with Advantage Sale Support)
+// POST /api/sales/process - Process a sale (UPDATED with Customer Balance Update)
 router.post('/process', async (req, res) => {
     const {
         cart, subtotal, tax, total, discountAmount,
@@ -186,7 +186,27 @@ router.post('/process', async (req, res) => {
             }
         }
 
-        // --- STEP 4: Record the Sale ---
+        // --- STEP 4: UPDATE CUSTOMER BALANCE IF CREDIT SALE ---
+        if (customerId && paymentMethod === 'Credit' && balanceDue > 0) {
+            console.log(`Updating customer ${customerId} balance by ${balanceDue}`);
+            
+            const updateCustomerBalanceQuery = `
+                UPDATE customers 
+                SET balance = balance + $1, updated_at = NOW() 
+                WHERE id = $2
+                RETURNING *;
+            `;
+            
+            const customerUpdateResult = await client.query(updateCustomerBalanceQuery, [balanceDue, customerId]);
+            
+            if (customerUpdateResult.rowCount === 0) {
+                throw new Error('Customer not found when updating balance');
+            }
+            
+            console.log('Customer balance updated successfully:', customerUpdateResult.rows[0]);
+        }
+
+        // --- STEP 5: Record the Sale ---
         const saleInsertQuery = `
             INSERT INTO sales_transactions (
                 subtotal, tax_amount, total_amount, discount_amount, cashier_id, 
@@ -221,7 +241,7 @@ router.post('/process', async (req, res) => {
         ]);
         const saleId = saleResult.rows[0].id;
 
-        // --- STEP 5: Record Sale Items ---
+        // --- STEP 6: Record Sale Items ---
         const itemsInsertQuery = `
             INSERT INTO sales_items (
                 sale_id, product_id, quantity, price_at_sale, discount_applied,
@@ -253,7 +273,7 @@ router.post('/process', async (req, res) => {
             ]);
         }
 
-        // --- STEP 6: Deduct Stock ---
+        // --- STEP 7: Deduct Stock ---
         for (const [productId, quantityToDeduct] of Object.entries(productsToUpdate)) {
             let updateParams = [quantityToDeduct, productId];
             if (stockTable === 'sales_user_stock') {
@@ -274,7 +294,7 @@ router.post('/process', async (req, res) => {
             }
         }
 
-        // --- STEP 7: Log Free Stock ---
+        // --- STEP 8: Log Free Stock ---
         if (freeStock && freeStock.quantities) {
             const { quantities, reason } = freeStock;
             const logQuery = `
