@@ -3,19 +3,42 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db/db');
 const { jwtDecode } = require('jwt-decode');
+// Helper to convert to Nigeria time
+const toNigeriaTime = (dateString) => {
+    if (!dateString) return null;
+    
+    const date = new Date(dateString);
+    // Nigeria is GMT+1, so we need to adjust if the time is in UTC
+    const nigeriaTime = new Date(date.getTime() + (60 * 60 * 1000));
+    return nigeriaTime.toISOString();
+};
 
-// Helper to get user ID from token
+// Helper to get user ID from token - UPDATED
 const getUserIdFromToken = (req) => {
     try {
-        const token = req.headers.authorization?.split(' ')[1];
-        if (token) {
-            const decoded = jwtDecode(token);
-            return decoded.id;
+        const authHeader = req.headers.authorization;
+        console.log('Auth header:', authHeader); // Debug log
+        
+        if (!authHeader) {
+            console.log('No authorization header');
+            return null;
         }
+
+        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
+        
+        if (!token) {
+            console.log('No token found');
+            return null;
+        }
+
+        const decoded = jwtDecode(token);
+        console.log('Decoded token:', decoded); // Debug log
+        
+        return decoded.id;
     } catch (e) {
-        console.error("Failed to decode token for staff operations", e);
+        console.error("Failed to decode token for staff operations:", e);
+        return null;
     }
-    return null;
 };
 
 // POST /api/staff/duties - Create a new staff duty assignment
