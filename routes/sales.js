@@ -338,7 +338,9 @@ router.get('/', async (req, res) => {
     try {
         const { 
             search, startDate, endDate, transactionType, paymentMethod, 
-            status, customerId, stockSource, hasFreeStock, discountRange 
+            status, customerId, stockSource, hasFreeStock, discountRange,
+            // NEW FILTER PARAMETERS
+            saleType, hasReceipt, hasReference, advantageRange
         } = req.query;
         
         let query = `
@@ -397,7 +399,7 @@ router.get('/', async (req, res) => {
             params.push(customerId);
             paramCount++;
         }
-        // NEW FILTERS
+        // EXISTING FILTERS
         if (stockSource) {
             query += ` AND st.stock_source = $${paramCount}`;
             params.push(stockSource);
@@ -421,6 +423,47 @@ router.get('/', async (req, res) => {
                     break;
                 case 'large':
                     query += ` AND st.discount_amount > 2000`;
+                    break;
+            }
+        }
+
+        // NEW FILTERS:
+
+        // Sale Type Filter (Advantage vs Regular)
+        if (saleType === 'advantage') {
+            query += ` AND st.is_advantage_sale = true`;
+        } else if (saleType === 'regular') {
+            query += ` AND (st.is_advantage_sale = false OR st.is_advantage_sale IS NULL)`;
+        }
+
+        // Has Receipt Filter
+        if (hasReceipt === 'true') {
+            query += ` AND st.payment_image_url IS NOT NULL AND st.payment_image_url != ''`;
+        } else if (hasReceipt === 'false') {
+            query += ` AND (st.payment_image_url IS NULL OR st.payment_image_url = '')`;
+        }
+
+        // Has Reference Filter
+        if (hasReference === 'true') {
+            query += ` AND st.payment_reference IS NOT NULL AND st.payment_reference != ''`;
+        } else if (hasReference === 'false') {
+            query += ` AND (st.payment_reference IS NULL OR st.payment_reference = '')`;
+        }
+
+        // Advantage Range Filter
+        if (advantageRange) {
+            switch(advantageRange) {
+                case 'none':
+                    query += ` AND (st.is_advantage_sale = false OR st.is_advantage_sale IS NULL OR st.advantage_total = 0 OR st.advantage_total IS NULL)`;
+                    break;
+                case 'small':
+                    query += ` AND st.is_advantage_sale = true AND st.advantage_total > 0 AND st.advantage_total <= 500`;
+                    break;
+                case 'medium':
+                    query += ` AND st.is_advantage_sale = true AND st.advantage_total > 500 AND st.advantage_total <= 2000`;
+                    break;
+                case 'large':
+                    query += ` AND st.is_advantage_sale = true AND st.advantage_total > 2000`;
                     break;
             }
         }
