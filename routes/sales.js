@@ -186,25 +186,27 @@ router.post('/process', async (req, res) => {
             }
         }
 
-        // --- STEP 4: UPDATE CUSTOMER BALANCE IF CREDIT SALE ---
-        if (customerId && paymentMethod === 'Credit' && balanceDue > 0) {
-            console.log(`Updating customer ${customerId} balance by ${balanceDue}`);
-            
-            const updateCustomerBalanceQuery = `
-                UPDATE customers 
-                SET balance = balance + $1, updated_at = NOW() 
-                WHERE id = $2
-                RETURNING *;
-            `;
-            
-            const customerUpdateResult = await client.query(updateCustomerBalanceQuery, [balanceDue, customerId]);
-            
-            if (customerUpdateResult.rowCount === 0) {
-                throw new Error('Customer not found when updating balance');
-            }
-            
-            console.log('Customer balance updated successfully:', customerUpdateResult.rows[0]);
-        }
+// --- STEP 4: UPDATE CUSTOMER BALANCE IF CREDIT SALE ---
+if (customerId && paymentMethod === 'Credit' && balanceDue > 0) {
+  console.log(`Updating customer ${customerId} balance by ${balanceDue} (remaining amount)`);
+  
+  const updateCustomerBalanceQuery = `
+    UPDATE customers 
+    SET balance = balance + $1, updated_at = NOW() 
+    WHERE id = $2
+    RETURNING *;
+  `;
+  
+  const customerUpdateResult = await client.query(updateCustomerBalanceQuery, [balanceDue, customerId]);
+  
+  if (customerUpdateResult.rowCount === 0) {
+    throw new Error('Customer not found when updating balance');
+  }
+  
+  console.log('Customer balance updated successfully:', customerUpdateResult.rows[0]);
+} else if (customerId && paymentMethod === 'Credit' && balanceDue === 0) {
+  console.log(`Credit sale with full payment - no balance to update for customer ${customerId}`);
+}
 
         // --- STEP 5: Record the Sale ---
         const saleInsertQuery = `
