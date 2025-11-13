@@ -149,12 +149,15 @@ router.delete('/duties/:id', async (req, res) => {
     }
 });
 
-// NEW: Staff Members Management (for staff without system roles)
+// Updated: Staff Members Management with complete details
 router.get('/members', async (req, res) => {
     try {
         const { department, isActive } = req.query;
         let query = `
-            SELECT id, fullname, phone_number, position, department, is_active, created_at
+            SELECT 
+                id, fullname, phone_number, email, gender, date_of_birth, 
+                position, department, address, emergency_contact_name, 
+                emergency_contact_phone, is_active, created_at
             FROM staff_members
             WHERE 1=1
         `;
@@ -181,7 +184,11 @@ router.get('/members', async (req, res) => {
 });
 
 router.post('/members', async (req, res) => {
-    const { fullname, phone_number, position, department } = req.body;
+    const { 
+        fullname, phone_number, email, gender, date_of_birth,
+        position, department, address, emergency_contact_name, 
+        emergency_contact_phone, is_active 
+    } = req.body;
     
     if (!fullname) {
         return res.status(400).json({ error: 'Full name is required.' });
@@ -189,10 +196,17 @@ router.post('/members', async (req, res) => {
 
     try {
         const result = await db.query(
-            `INSERT INTO staff_members (fullname, phone_number, position, department)
-             VALUES ($1, $2, $3, $4)
+            `INSERT INTO staff_members 
+                (fullname, phone_number, email, gender, date_of_birth,
+                 position, department, address, emergency_contact_name, 
+                 emergency_contact_phone, is_active)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
              RETURNING *`,
-            [fullname, phone_number, position, department]
+            [
+                fullname, phone_number, email, gender, date_of_birth,
+                position, department, address, emergency_contact_name,
+                emergency_contact_phone, is_active !== false
+            ]
         );
         res.status(201).json(result.rows[0]);
     } catch (error) {
@@ -203,15 +217,28 @@ router.post('/members', async (req, res) => {
 
 router.put('/members/:id', async (req, res) => {
     const { id } = req.params;
-    const { fullname, phone_number, position, department, is_active } = req.body;
+    const { 
+        fullname, phone_number, email, gender, date_of_birth,
+        position, department, address, emergency_contact_name, 
+        emergency_contact_phone, is_active 
+    } = req.body;
 
     try {
         const result = await db.query(
             `UPDATE staff_members 
-             SET fullname = $1, phone_number = $2, position = $3, department = $4, is_active = $5, updated_at = NOW()
-             WHERE id = $6
+             SET 
+                fullname = $1, phone_number = $2, email = $3, gender = $4, 
+                date_of_birth = $5, position = $6, department = $7, 
+                address = $8, emergency_contact_name = $9, 
+                emergency_contact_phone = $10, is_active = $11, 
+                updated_at = NOW()
+             WHERE id = $12
              RETURNING *`,
-            [fullname, phone_number, position, department, is_active, id]
+            [
+                fullname, phone_number, email, gender, date_of_birth,
+                position, department, address, emergency_contact_name,
+                emergency_contact_phone, is_active, id
+            ]
         );
         
         if (result.rows.length === 0) {
