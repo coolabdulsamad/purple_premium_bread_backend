@@ -149,4 +149,258 @@ router.delete('/duties/:id', async (req, res) => {
     }
 });
 
+// NEW: Staff Members Management (for staff without system roles)
+router.get('/members', async (req, res) => {
+    try {
+        const { department, isActive } = req.query;
+        let query = `
+            SELECT id, fullname, phone_number, position, department, is_active, created_at
+            FROM staff_members
+            WHERE 1=1
+        `;
+        const params = [];
+        let paramIndex = 1;
+
+        if (department) {
+            query += ` AND department ILIKE $${paramIndex++}`;
+            params.push(`%${department}%`);
+        }
+        if (isActive !== undefined) {
+            query += ` AND is_active = $${paramIndex++}`;
+            params.push(isActive === 'true');
+        }
+
+        query += ` ORDER BY fullname ASC`;
+
+        const result = await db.query(query, params);
+        res.status(200).json(result.rows);
+    } catch (error) {
+        console.error('Error fetching staff members:', error);
+        res.status(500).json({ error: 'Failed to fetch staff members.', details: error.message });
+    }
+});
+
+router.post('/members', async (req, res) => {
+    const { fullname, phone_number, position, department } = req.body;
+    
+    if (!fullname) {
+        return res.status(400).json({ error: 'Full name is required.' });
+    }
+
+    try {
+        const result = await db.query(
+            `INSERT INTO staff_members (fullname, phone_number, position, department)
+             VALUES ($1, $2, $3, $4)
+             RETURNING *`,
+            [fullname, phone_number, position, department]
+        );
+        res.status(201).json(result.rows[0]);
+    } catch (error) {
+        console.error('Error creating staff member:', error);
+        res.status(500).json({ error: 'Failed to create staff member.', details: error.message });
+    }
+});
+
+router.put('/members/:id', async (req, res) => {
+    const { id } = req.params;
+    const { fullname, phone_number, position, department, is_active } = req.body;
+
+    try {
+        const result = await db.query(
+            `UPDATE staff_members 
+             SET fullname = $1, phone_number = $2, position = $3, department = $4, is_active = $5, updated_at = NOW()
+             WHERE id = $6
+             RETURNING *`,
+            [fullname, phone_number, position, department, is_active, id]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Staff member not found.' });
+        }
+        res.status(200).json(result.rows[0]);
+    } catch (error) {
+        console.error('Error updating staff member:', error);
+        res.status(500).json({ error: 'Failed to update staff member.', details: error.message });
+    }
+});
+
+// NEW: Staff Attendance Management
+router.post('/attendance', async (req, res) => {
+    const { user_id, staff_member_id, attendance_date, sign_in_time, sign_out_time, status, notes } = req.body;
+    const recorded_by = getUserIdFromToken(req);
+
+    if (!recorded_by) {
+        return res.status(401).json({ error: 'Unauthorized: User not identified.' });
+    }
+
+    if (!attendance_date) {
+        return res.status(400).json({ error: 'Attendance date is required.' });
+    }
+
+    // Validate that either user_id or staff_member_id is provided
+    if (!user_id && !staff_member_id) {
+        return res.status(400).json({ error: 'Either user ID or staff member ID is required.' });
+    }
+
+    try {
+        // Check if attendance already exists for this person on this date
+        const existingQuery = `
+            SELECT id FROM staff_attendance 
+            WHERE attendance_date = $1 AND (
+                (user_id = $2 AND user_id IS NOT NULL) OR 
+                (staff_member_id = $3 AND staff_member_id IS NOT NULL)
+            )
+        `;
+        const existingResult = await db.query(existingQuery, [attendance_date, user_id, staff_member_id]);
+
+        if (existingResult.rows.length > 0) {
+            return res.status(409).json({ error: 'Attendance already recorded for this staff on this date.' });
+        }
+
+        const result = await db.query(
+            `INSERT INTO staff_attendance (user_id, staff_member_id, attendance_date, sign_in_time, sign_out_time, status, notes, recorded_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             RETURNING *`,
+            [user_id, staff_member_id, attendance_date, sign_in_time, sign_out_time, status, notes, recorded_by]
+        );
+        res.status(201).json(result.rows[0]);
+    } catch (error) {
+        console.error('Error recording attendance:', error);
+        res.status(500).json({ error: 'Failed to record attendance.', details: error.message });
+    }
+});
+
+router.put('/attendance/:id/sign-out', async (req, res) => {
+    const { id } = req.params;
+    const { sign_out_time, notes } = req.body;
+
+    try {
+        const result = await db.query(
+            `UPDATE staff_attendance 
+             SET sign_out_time = $1, notes = COALESCE($2, notes)
+             WHERE id = $3
+             RETURNING *`,
+            [sign_out_time, notes, id]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Attendance record not found.' });
+        }
+        res.status(200).json(result.rows[0]);
+    } catch (error) {
+        console.error('Error updating sign-out time:', error);
+        res.status(500).json({ error: 'Failed to update sign-out time.', details: error.message });
+    }
+});
+
+router.get('/attendance', async (req, res) => {
+    const { 
+        startDate, 
+        endDate, 
+        userId, 
+        staffMemberId, 
+        department, 
+        status,
+        showPunctual 
+    } = req.query;
+
+    let query = `
+        SELECT 
+            sa.*,
+            u.fullname as user_fullname,
+            u.role as user_role,
+            sm.fullname as staff_member_fullname,
+            sm.position as staff_member_position,
+            sm.department as staff_member_department,
+            recorder.fullname as recorded_by_name
+        FROM staff_attendance sa
+        LEFT JOIN users u ON sa.user_id = u.id
+        LEFT JOIN staff_members sm ON sa.staff_member_id = sm.id
+        LEFT JOIN users recorder ON sa.recorded_by = recorder.id
+        WHERE 1=1
+    `;
+    const params = [];
+    let paramIndex = 1;
+
+    if (startDate) {
+        query += ` AND sa.attendance_date >= $${paramIndex++}`;
+        params.push(startDate);
+    }
+    if (endDate) {
+        query += ` AND sa.attendance_date <= $${paramIndex++}`;
+        params.push(endDate);
+    }
+    if (userId) {
+        query += ` AND sa.user_id = $${paramIndex++}`;
+        params.push(userId);
+    }
+    if (staffMemberId) {
+        query += ` AND sa.staff_member_id = $${paramIndex++}`;
+        params.push(staffMemberId);
+    }
+    if (department) {
+        query += ` AND (u.role = $${paramIndex} OR sm.department = $${paramIndex})`;
+        params.push(department);
+        paramIndex++;
+    }
+    if (status) {
+        query += ` AND sa.status = $${paramIndex++}`;
+        params.push(status);
+    }
+
+    query += ` ORDER BY sa.attendance_date DESC, sa.sign_in_time DESC`;
+
+    try {
+        const result = await db.query(query, params);
+        
+        // Filter for punctual staff if requested
+        let attendanceData = result.rows;
+        if (showPunctual === 'true') {
+            attendanceData = attendanceData.filter(record => {
+                if (!record.sign_in_time) return false;
+                
+                const signInTime = new Date(record.sign_in_time);
+                const expectedTime = new Date(record.attendance_date);
+                expectedTime.setHours(8, 0, 0, 0); // Expected sign-in at 8:00 AM
+                
+                return signInTime <= expectedTime; // Signed in on or before expected time
+            });
+        }
+
+        res.status(200).json(attendanceData);
+    } catch (error) {
+        console.error('Error fetching attendance:', error);
+        res.status(500).json({ error: 'Failed to fetch attendance records.', details: error.message });
+    }
+});
+
+// NEW: Get attendance statistics
+router.get('/attendance/stats', async (req, res) => {
+    const { startDate, endDate } = req.query;
+
+    try {
+        const query = `
+            SELECT 
+                COALESCE(u.fullname, sm.fullname) as staff_name,
+                COUNT(*) as total_days,
+                COUNT(CASE WHEN sa.status = 'Present' THEN 1 END) as present_days,
+                COUNT(CASE WHEN sa.status = 'Absent' THEN 1 END) as absent_days,
+                COUNT(CASE WHEN sa.status = 'Late' THEN 1 END) as late_days,
+                AVG(EXTRACT(EPOCH FROM (sa.sign_out_time - sa.sign_in_time))/3600) as avg_hours_worked
+            FROM staff_attendance sa
+            LEFT JOIN users u ON sa.user_id = u.id
+            LEFT JOIN staff_members sm ON sa.staff_member_id = sm.id
+            WHERE sa.attendance_date >= $1 AND sa.attendance_date <= $2
+            GROUP BY staff_name
+            ORDER BY present_days DESC
+        `;
+        
+        const result = await db.query(query, [startDate || '2024-01-01', endDate || '2024-12-31']);
+        res.status(200).json(result.rows);
+    } catch (error) {
+        console.error('Error fetching attendance stats:', error);
+        res.status(500).json({ error: 'Failed to fetch attendance statistics.', details: error.message });
+    }
+});
+
 module.exports = router;

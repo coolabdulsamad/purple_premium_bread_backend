@@ -226,4 +226,28 @@ router.put('/toggle-demo-stock/:userId', async (req, res) => {
     }
 });
 
+// Updated: GET /api/users - Get all users AND staff members for duty assignments
+router.get('/for-duties', async (req, res) => {
+    try {
+        // Get system users
+        const usersQuery = `SELECT id, fullname, username, email, role FROM users WHERE is_active = true ORDER BY fullname ASC`;
+        const usersResult = await db.query(usersQuery);
+        
+        // Get staff members (non-system users)
+        const staffQuery = `SELECT id, fullname, position as role FROM staff_members WHERE is_active = true ORDER BY fullname ASC`;
+        const staffResult = await db.query(staffQuery);
+        
+        // Combine both results
+        const combined = [
+            ...usersResult.rows.map(user => ({ ...user, type: 'system_user' })),
+            ...staffResult.rows.map(staff => ({ ...staff, type: 'staff_member' }))
+        ];
+        
+        res.status(200).json(combined);
+    } catch (error) {
+        console.error('Error fetching users for duties:', error);
+        res.status(500).json({ error: 'Failed to fetch users for duties.', details: error.message });
+    }
+});
+
 module.exports = router;
