@@ -274,10 +274,12 @@ router.put('/members/:id', async (req, res) => {
     }
 });
 
-// NEW: Staff Attendance Management
+// POST /api/staff/attendance - Updated with better data handling
 router.post('/attendance', async (req, res) => {
-    const { user_id, staff_member_id, attendance_date, sign_in_time, sign_out_time, status, notes } = req.body;
+    let { user_id, staff_member_id, attendance_date, sign_in_time, sign_out_time, status, notes } = req.body;
     const recorded_by = getUserIdFromToken(req);
+
+    console.log('Received attendance data:', req.body); // Debug log
 
     if (!recorded_by) {
         return res.status(401).json({ error: 'Unauthorized: User not identified.' });
@@ -288,8 +290,20 @@ router.post('/attendance', async (req, res) => {
     }
 
     // Validate that either user_id or staff_member_id is provided
-    if (!user_id && !staff_member_id) {
+    if ((!user_id || user_id === '') && (!staff_member_id || staff_member_id === '')) {
         return res.status(400).json({ error: 'Either user ID or staff member ID is required.' });
+    }
+
+    // Convert empty strings to null for integer fields
+    user_id = user_id && user_id !== '' ? parseInt(user_id) : null;
+    staff_member_id = staff_member_id && staff_member_id !== '' ? parseInt(staff_member_id) : null;
+
+    // Validate conversion
+    if (user_id && isNaN(user_id)) {
+        return res.status(400).json({ error: 'Invalid user ID format.' });
+    }
+    if (staff_member_id && isNaN(staff_member_id)) {
+        return res.status(400).json({ error: 'Invalid staff member ID format.' });
     }
 
     try {
