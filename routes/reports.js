@@ -22,16 +22,22 @@ const applyDateFilters = (baseQuery, baseParams, initialParamIndex, startDate, e
     return { query, params, paramIndex };
 };
 
-// Enhanced Profit & Loss Summary Report with Operating Expenses and Salaries
+// In your reports.js file, update the profit-loss endpoint:
+
+// Enhanced Profit & Loss Summary Report with Tax Calculation and Advantage Amounts
 router.get('/profit-loss', async (req, res) => {
     const { startDate, endDate, branchId } = req.query;
 
     try {
-        // Total Revenue from Sales
+        // Total Revenue from Sales - Updated to include advantage amounts
         let revenueQuery = `
-            SELECT COALESCE(SUM(total_amount), 0) AS total_revenue,
-                   COALESCE(SUM(total_cogs), 0) AS total_cogs,
-                   COALESCE(SUM(total_profit), 0) AS total_profit
+            SELECT 
+                COALESCE(SUM(total_amount), 0) AS total_revenue,
+                COALESCE(SUM(total_cogs), 0) AS total_cogs,
+                COALESCE(SUM(total_profit), 0) AS total_profit,
+                COALESCE(SUM(CASE WHEN is_advantage_sale = true THEN advantage_total ELSE 0 END), 0) AS total_advantage_amount,
+                COALESCE(SUM(CASE WHEN is_advantage_sale = true THEN total_amount ELSE 0 END), 0) AS total_advantage_sales,
+                COALESCE(SUM(CASE WHEN is_advantage_sale = false OR is_advantage_sale IS NULL THEN total_amount ELSE 0 END), 0) AS total_regular_sales
             FROM sales_transactions
             WHERE status != 'Cancelled'
         `;
@@ -47,9 +53,16 @@ router.get('/profit-loss', async (req, res) => {
         }
 
         const salesResult = await db.query(revenueQuery, revenueParams);
-        const { total_revenue, total_cogs, total_profit } = salesResult.rows[0];
+        const { 
+            total_revenue, 
+            total_cogs, 
+            total_profit, 
+            total_advantage_amount,
+            total_advantage_sales,
+            total_regular_sales 
+        } = salesResult.rows[0];
 
-        // Total Operating Expenses (all expenses regardless of branch association)
+        // Total Operating Expenses
         let expensesQuery = `
             SELECT COALESCE(SUM(amount), 0) AS total_operating_expenses
             FROM operating_expenses
@@ -60,12 +73,6 @@ router.get('/profit-loss', async (req, res) => {
 
         ({ query: expensesQuery, params: expensesParams, paramIndex } =
             applyDateFilters(expensesQuery, expensesParams, paramIndex, startDate, endDate, 'expense_date'));
-
-        // Remove branch filtering for operating expenses since users table doesn't have branch_id
-        // if (branchId) {
-        //     expensesQuery += ` AND recorded_by IN (SELECT id FROM users WHERE branch_id = $${paramIndex++})`;
-        //     expensesParams.push(parseInt(branchId));
-        // }
 
         const expensesResult = await db.query(expensesQuery, expensesParams);
         const totalOperatingExpenses = parseFloat(expensesResult.rows[0].total_operating_expenses);
@@ -85,36 +92,34 @@ router.get('/profit-loss', async (req, res) => {
         const salariesResult = await db.query(salariesQuery, salariesParams);
         const totalSalaries = parseFloat(salariesResult.rows[0].total_salaries);
 
-        // Other Expenses (operating expenses minus any salary-related entries)
-        // let otherExpensesQuery = `
-        //     SELECT COALESCE(SUM(amount), 0) AS other_expenses
-        //     FROM operating_expenses
-        //     WHERE status = 'active' 
-        //     AND (expense_type NOT ILIKE '%salary%' AND expense_type NOT ILIKE '%wage%')
-        // `;
-        // let otherExpensesParams = [];
-        // paramIndex = 1;
-
-        // ({ query: otherExpensesQuery, params: otherExpensesParams, paramIndex } =
-            // applyDateFilters(otherExpensesQuery, otherExpensesParams, paramIndex, startDate, endDate, 'expense_date'));
-
-        // const otherExpensesResult = await db.query(otherExpensesQuery, otherExpensesParams);
-        // const otherExpenses = parseFloat(otherExpensesResult.rows[0].other_expenses);
-
+        // Calculate taxable income and tax
         const grossProfit = parseFloat(total_revenue) - parseFloat(total_cogs);
-        // const netProfit = grossProfit - totalOperatingExpenses - totalSalaries - otherExpenses;
-        const netProfit = grossProfit - totalOperatingExpenses - totalSalaries;
+        const totalExpenses = totalOperatingExpenses + totalSalaries;
+        const taxableIncome = Math.max(0, grossProfit - totalExpenses); // Ensure taxable income is not negative
+        const taxRate = 0.30; // 30% tax rate
+        const taxAmount = taxableIncome * taxRate;
+        
+        // Calculate net profit after tax
+        const netProfitBeforeTax = grossProfit - totalExpenses;
+        const netProfit = netProfitBeforeTax - taxAmount;
 
         res.status(200).json({
             reportTitle: 'Profit & Loss Summary',
             filtersUsed: { startDate, endDate, branchId },
             reportData: {
                 totalRevenue: parseFloat(total_revenue),
+                totalRegularSales: parseFloat(total_regular_sales),
+                totalAdvantageSales: parseFloat(total_advantage_sales),
+                totalAdvantageAmount: parseFloat(total_advantage_amount),
                 totalCostOfGoodsSold: parseFloat(total_cogs),
                 grossProfit: grossProfit,
                 totalOperatingExpenses: totalOperatingExpenses,
                 totalSalaries: totalSalaries,
-                // otherExpenses: otherExpenses,
+                totalExpenses: totalExpenses,
+                taxableIncome: taxableIncome,
+                taxRate: taxRate * 100, // Convert to percentage for display
+                taxAmount: taxAmount,
+                netProfitBeforeTax: netProfitBeforeTax,
                 netProfit: netProfit
             }
         });
@@ -125,7 +130,121 @@ router.get('/profit-loss', async (req, res) => {
     }
 });
 
-// Enhanced Detailed Sales Report with Discounts and Free Stock
+// NEW: Advantage Sales Analysis Report
+router.get('/advantage-sales-analysis', async (req, res) => {
+    const { startDate, endDate, branchId, productId, staffId } = req.query;
+
+    try {
+        let query = `
+            SELECT
+                st.id AS sale_id,
+                st.sale_date,
+                COALESCE(c.fullname, 'Walk-in Customer') AS customer_name,
+                u.fullname AS cashier_name,
+                b.name AS branch_name,
+                st.payment_method,
+                st.status,
+                st.is_advantage_sale,
+                st.advantage_total,
+                st.base_subtotal,
+                st.subtotal,
+                st.total_amount,
+                st.total_cogs,
+                st.total_profit,
+                st.note,
+                st.payment_reference,
+                -- Calculate advantage profit (additional profit from advantage sales)
+                CASE 
+                    WHEN st.is_advantage_sale = true THEN st.total_profit - (st.total_amount - st.advantage_total - st.total_cogs)
+                    ELSE 0 
+                END AS advantage_profit
+            FROM sales_transactions st
+            LEFT JOIN customers c ON st.customer_id = c.id
+            LEFT JOIN users u ON st.cashier_id = u.id
+            LEFT JOIN branches b ON st.branch_id = b.id
+            WHERE st.status != 'Cancelled'
+            AND st.is_advantage_sale = true
+        `;
+        let params = [];
+        let paramIndex = 1;
+
+        ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'st.sale_date'));
+
+        if (branchId) {
+            query += ` AND st.branch_id = $${paramIndex++}`;
+            params.push(parseInt(branchId));
+        }
+        if (productId) {
+            // Join with sales_items to filter by product
+            query = `
+                SELECT DISTINCT
+                    st.id AS sale_id,
+                    st.sale_date,
+                    COALESCE(c.fullname, 'Walk-in Customer') AS customer_name,
+                    u.fullname AS cashier_name,
+                    b.name AS branch_name,
+                    st.payment_method,
+                    st.status,
+                    st.is_advantage_sale,
+                    st.advantage_total,
+                    st.base_subtotal,
+                    st.subtotal,
+                    st.total_amount,
+                    st.total_cogs,
+                    st.total_profit,
+                    st.note,
+                    st.payment_reference,
+                    CASE 
+                        WHEN st.is_advantage_sale = true THEN st.total_profit - (st.total_amount - st.advantage_total - st.total_cogs)
+                        ELSE 0 
+                    END AS advantage_profit
+                FROM sales_transactions st
+                LEFT JOIN customers c ON st.customer_id = c.id
+                LEFT JOIN users u ON st.cashier_id = u.id
+                LEFT JOIN branches b ON st.branch_id = b.id
+                JOIN sales_items si ON st.id = si.sale_id
+                WHERE st.status != 'Cancelled'
+                AND st.is_advantage_sale = true
+                AND si.product_id = $${paramIndex++}
+            `;
+            params.push(parseInt(productId));
+            
+            // Re-apply date filters
+            ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'st.sale_date'));
+        }
+        if (staffId) {
+            query += ` AND st.cashier_id = $${paramIndex++}`;
+            params.push(parseInt(staffId));
+        }
+
+        query += ` ORDER BY st.sale_date DESC;`;
+
+        const result = await db.query(query, params);
+
+        // Calculate summary statistics
+        const summary = {
+            totalAdvantageSales: result.rows.length,
+            totalAdvantageAmount: result.rows.reduce((sum, row) => sum + parseFloat(row.advantage_total || 0), 0),
+            totalSalesAmount: result.rows.reduce((sum, row) => sum + parseFloat(row.total_amount || 0), 0),
+            totalAdvantageProfit: result.rows.reduce((sum, row) => sum + parseFloat(row.advantage_profit || 0), 0),
+            averageAdvantagePerSale: result.rows.length > 0 ? 
+                result.rows.reduce((sum, row) => sum + parseFloat(row.advantage_total || 0), 0) / result.rows.length : 0
+        };
+
+        res.status(200).json({
+            reportTitle: 'Advantage Sales Analysis Report',
+            filtersUsed: { startDate, endDate, branchId, productId, staffId },
+            summary: summary,
+            reportData: result.rows
+        });
+
+    } catch (error) {
+        console.error('Error generating advantage sales analysis report:', error);
+        res.status(500).json({ error: 'Failed to generate advantage sales analysis report.', details: error.message });
+    }
+});
+
+// Update the detailed sales report to include advantage amounts
 router.get('/detailed-sales', async (req, res) => {
     const { startDate, endDate, paymentMethod, customerId, status, minTotal, maxTotal, staffId, branchId, transactionType } = req.query;
 
@@ -150,7 +269,20 @@ router.get('/detailed-sales', async (req, res) => {
             st.note,
             st.amount_paid,
             st.balance_due,
-            st.due_date
+            st.due_date,
+            -- NEW: Advantage sale fields
+            st.is_advantage_sale,
+            st.advantage_total,
+            st.base_subtotal,
+            -- Calculate additional metrics
+            CASE 
+                WHEN st.is_advantage_sale = true THEN st.total_profit - (st.total_amount - st.advantage_total - st.total_cogs)
+                ELSE 0 
+            END AS advantage_profit,
+            CASE 
+                WHEN st.is_advantage_sale = true THEN st.total_amount - st.advantage_total
+                ELSE st.total_amount
+            END AS base_sales_amount
         FROM sales_transactions st
         LEFT JOIN customers c ON st.customer_id = c.id
         LEFT JOIN users u ON st.cashier_id = u.id
@@ -161,6 +293,8 @@ router.get('/detailed-sales', async (req, res) => {
     let paramIndex = 1;
 
     ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'st.sale_date'));
+
+    // ... existing filter logic remains the same ...
 
     if (paymentMethod) {
         query += ` AND st.payment_method ILIKE $${paramIndex++}`;
@@ -209,6 +343,91 @@ router.get('/detailed-sales', async (req, res) => {
         res.status(500).json({ error: 'Failed to generate detailed sales report.', details: error.message });
     }
 });
+
+// Enhanced Detailed Sales Report with Discounts and Free Stock
+// router.get('/detailed-sales', async (req, res) => {
+//     const { startDate, endDate, paymentMethod, customerId, status, minTotal, maxTotal, staffId, branchId, transactionType } = req.query;
+
+//     let query = `
+//         SELECT
+//             st.id AS sale_id,
+//             st.sale_date,
+//             COALESCE(c.fullname, 'Walk-in Customer') AS customer_name,
+//             u.fullname AS cashier_name,
+//             b.name AS branch_name,
+//             st.payment_method,
+//             st.status,
+//             st.transaction_type,
+//             st.subtotal,
+//             st.discount_amount,
+//             st.tax_amount,
+//             st.total_amount,
+//             st.total_cogs,
+//             st.total_profit,
+//             st.stock_source,
+//             st.receipt_reference,
+//             st.note,
+//             st.amount_paid,
+//             st.balance_due,
+//             st.due_date
+//         FROM sales_transactions st
+//         LEFT JOIN customers c ON st.customer_id = c.id
+//         LEFT JOIN users u ON st.cashier_id = u.id
+//         LEFT JOIN branches b ON st.branch_id = b.id
+//         WHERE st.status != 'Cancelled'
+//     `;
+//     let params = [];
+//     let paramIndex = 1;
+
+//     ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'st.sale_date'));
+
+//     if (paymentMethod) {
+//         query += ` AND st.payment_method ILIKE $${paramIndex++}`;
+//         params.push(`%${paymentMethod}%`);
+//     }
+//     if (customerId) {
+//         query += ` AND st.customer_id = $${paramIndex++}`;
+//         params.push(parseInt(customerId));
+//     }
+//     if (status) {
+//         query += ` AND st.status ILIKE $${paramIndex++}`;
+//         params.push(`%${status}%`);
+//     }
+//     if (minTotal) {
+//         query += ` AND st.total_amount >= $${paramIndex++}`;
+//         params.push(parseFloat(minTotal));
+//     }
+//     if (maxTotal) {
+//         query += ` AND st.total_amount <= $${paramIndex++}`;
+//         params.push(parseFloat(maxTotal));
+//     }
+//     if (staffId) {
+//         query += ` AND st.cashier_id = $${paramIndex++}`;
+//         params.push(parseInt(staffId));
+//     }
+//     if (branchId) {
+//         query += ` AND st.branch_id = $${paramIndex++}`;
+//         params.push(parseInt(branchId));
+//     }
+//     if (transactionType) {
+//         query += ` AND st.transaction_type ILIKE $${paramIndex++}`;
+//         params.push(`%${transactionType}%`);
+//     }
+
+//     query += ` ORDER BY st.sale_date DESC;`;
+
+//     try {
+//         const result = await db.query(query, params);
+//         res.status(200).json({
+//             reportTitle: 'Detailed Sales Report',
+//             filtersUsed: { startDate, endDate, paymentMethod, customerId, status, minTotal, maxTotal, staffId, branchId, transactionType },
+//             reportData: result.rows
+//         });
+//     } catch (error) {
+//         console.error('Error generating detailed sales report:', error);
+//         res.status(500).json({ error: 'Failed to generate detailed sales report.', details: error.message });
+//     }
+// });
 
 // Free Stock Report
 router.get('/free-stock', async (req, res) => {
