@@ -266,6 +266,7 @@ router.get('/detailed-sales', async (req, res) => {
             st.total_profit,
             st.stock_source,
             st.receipt_reference,
+            st.payment_image_url,
             st.note,
             st.amount_paid,
             st.balance_due,
