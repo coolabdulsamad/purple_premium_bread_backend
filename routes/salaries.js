@@ -807,7 +807,7 @@ router.get('/all-staff', async (req, res) => {
 // routes/salaries.js
 
 // POST /api/salaries/staff/:type/:id/salary - FIXED AND CONSOLIDATED VERSION
-router.post('/staff/:type/:id/salary', authenticate.verifyToken, authenticate.checkRole(['admin', 'manager', 'accountant']), async (req, res) => {
+router.post('/staff/:type/:id/salary', authenticate.verifyToken, authenticate, async (req, res) => {
     const { type, id } = req.params;
     const {
         base_salary,
