@@ -1000,8 +1000,164 @@ router.get('/all-staff', async (req, res) => {
 // staff_type (optional) should be "user" or "staff_member". If omitted and id exists in exactly one table we auto-pick.
 // If id exists in BOTH tables and staff_type is omitted -> 400 (client must disambiguate).
 
-router.post('/staff/staff_member/:id/salary', async (req, res) => {
-  const { id } = req.params;
+// router.post('/staff/staff_member/:id/salary', async (req, res) => {
+//   const { id } = req.params;
+//   const {
+//     base_salary,
+//     allowances,
+//     deductions,
+//     salary_type,
+//     bank_name,
+//     bank_account_name,
+//     account_number,
+//     tax_rate,
+//     pension_rate,
+//     staff_type // optional: 'user' or 'staff_member'
+//   } = req.body;
+
+//   try {
+//     // normalize staff_type if provided
+//     let requestedType = staff_type ? String(staff_type).toLowerCase() : null;
+//     if (requestedType && !['user', 'staff_member'].includes(requestedType)) {
+//       return res.status(400).json({ error: 'staff_type must be "user" or "staff_member" if provided.' });
+//     }
+
+//     // check existence in both tables
+//     const [uRes, sRes] = await Promise.all([
+//       db.query('SELECT id FROM users WHERE id = $1', [id]),
+//       db.query('SELECT id FROM staff_members WHERE id = $1', [id])
+//     ]);
+
+//     const existsInUsers = uRes.rows.length > 0;
+//     const existsInStaffMembers = sRes.rows.length > 0;
+
+//     if (!existsInUsers && !existsInStaffMembers) {
+//       return res.status(404).json({ error: 'ID not found in users or staff_members.' });
+//     }
+
+//     // Disambiguation policy:
+//     // 1) If client provided staff_type, use it (but ensure the id exists in that table).
+//     // 2) Else if id exists in exactly one table, use that.
+//     // 3) Else (exists in both and no staff_type) -> return 400 asking client to disambiguate.
+//     let finalType = null;
+//     if (requestedType) {
+//       if (requestedType === 'user' && !existsInUsers) {
+//         return res.status(400).json({ error: 'staff_type "user" provided but id not found in users.' });
+//       }
+//       if (requestedType === 'staff_member' && !existsInStaffMembers) {
+//         return res.status(400).json({ error: 'staff_type "staff_member" provided but id not found in staff_members.' });
+//       }
+//       finalType = requestedType;
+//     } else {
+//       if (existsInUsers && !existsInStaffMembers) finalType = 'user';
+//       else if (existsInStaffMembers && !existsInUsers) finalType = 'staff_member';
+//       else {
+//         // exists in both, and no disambiguation provided — force client to choose
+//         return res.status(400).json({
+//           error: 'Ambiguous id: record exists in both users and staff_members. Provide staff_type in request body ("user" or "staff_member").'
+//         });
+//       }
+//     }
+
+//     // compute net salary
+//     const netSalary =
+//       parseFloat(base_salary || 0) +
+//       parseFloat(allowances || 0) -
+//       parseFloat(deductions || 0);
+
+//     let query, params;
+
+//     if (finalType === 'user') {
+//       // Upsert by user_id (unique constraint staff_salaries_user_id_key)
+//       query = `
+//         INSERT INTO staff_salaries (
+//           user_id, staff_member_id, base_salary, allowances, deductions,
+//           net_salary, salary_type, bank_name, bank_account_name,
+//           account_number, tax_rate, pension_rate, updated_at
+//         ) VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, CURRENT_TIMESTAMP)
+//         ON CONFLICT (user_id)
+//         DO UPDATE SET
+//           base_salary = EXCLUDED.base_salary,
+//           allowances = EXCLUDED.allowances,
+//           deductions = EXCLUDED.deductions,
+//           net_salary = EXCLUDED.net_salary,
+//           salary_type = EXCLUDED.salary_type,
+//           bank_name = EXCLUDED.bank_name,
+//           bank_account_name = EXCLUDED.bank_account_name,
+//           account_number = EXCLUDED.account_number,
+//           tax_rate = EXCLUDED.tax_rate,
+//           pension_rate = EXCLUDED.pension_rate,
+//           updated_at = CURRENT_TIMESTAMP
+//         RETURNING *;
+//       `;
+//       params = [
+//         id,
+//         parseFloat(base_salary || 0),
+//         parseFloat(allowances || 0),
+//         parseFloat(deductions || 0),
+//         netSalary,
+//         salary_type,
+//         bank_name,
+//         bank_account_name,
+//         account_number,
+//         parseFloat(tax_rate || 0),
+//         parseFloat(pension_rate || 0)
+//       ];
+//     } else {
+//       // finalType === 'staff_member'
+//       // Upsert by staff_member_id (unique constraint staff_salaries_staff_member_id_key)
+//       query = `
+//         INSERT INTO staff_salaries (
+//           user_id, staff_member_id, base_salary, allowances, deductions,
+//           net_salary, salary_type, bank_name, bank_account_name,
+//           account_number, tax_rate, pension_rate, updated_at
+//         ) VALUES (NULL, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, CURRENT_TIMESTAMP)
+//         ON CONFLICT (staff_member_id)
+//         DO UPDATE SET
+//           base_salary = EXCLUDED.base_salary,
+//           allowances = EXCLUDED.allowances,
+//           deductions = EXCLUDED.deductions,
+//           net_salary = EXCLUDED.net_salary,
+//           salary_type = EXCLUDED.salary_type,
+//           bank_name = EXCLUDED.bank_name,
+//           bank_account_name = EXCLUDED.bank_account_name,
+//           account_number = EXCLUDED.account_number,
+//           tax_rate = EXCLUDED.tax_rate,
+//           pension_rate = EXCLUDED.pension_rate,
+//           updated_at = CURRENT_TIMESTAMP
+//         RETURNING *;
+//       `;
+//       params = [
+//         id,
+//         parseFloat(base_salary || 0),
+//         parseFloat(allowances || 0),
+//         parseFloat(deductions || 0),
+//         netSalary,
+//         salary_type,
+//         bank_name,
+//         bank_account_name,
+//         account_number,
+//         parseFloat(tax_rate || 0),
+//         parseFloat(pension_rate || 0)
+//       ];
+//     }
+
+//     const result = await db.query(query, params);
+//     return res.status(200).json(result.rows[0]);
+
+//   } catch (err) {
+//     console.error('Salary upsert error:', err);
+//     return res.status(500).json({ error: 'Failed to save salary', details: err.message });
+//   }
+// });
+
+// routes/salaries.js
+
+// 🚨 REMOVE the old, static route: router.post('/staff/staff_member/:id/salary', async (req, res) => { ... });
+
+// 🚀 ADD this new, dynamic, and robust route:
+router.post('/staff/:type/:id/salary', async (req, res) => {
+  const { type, id } = req.params; // <-- We now correctly use the dynamic type
   const {
     base_salary,
     allowances,
@@ -1012,135 +1168,72 @@ router.post('/staff/staff_member/:id/salary', async (req, res) => {
     account_number,
     tax_rate,
     pension_rate,
-    staff_type // optional: 'user' or 'staff_member'
   } = req.body;
 
   try {
-    // normalize staff_type if provided
-    let requestedType = staff_type ? String(staff_type).toLowerCase() : null;
-    if (requestedType && !['user', 'staff_member'].includes(requestedType)) {
-      return res.status(400).json({ error: 'staff_type must be "user" or "staff_member" if provided.' });
-    }
+    const staffId = parseInt(id);
+    
+    // 1. Validate type and determine which column to use
+    let idColumn;
+    let user_id_value = null;
+    let staff_member_id_value = null;
+    
+    const staffType = String(type).toLowerCase();
 
-    // check existence in both tables
-    const [uRes, sRes] = await Promise.all([
-      db.query('SELECT id FROM users WHERE id = $1', [id]),
-      db.query('SELECT id FROM staff_members WHERE id = $1', [id])
-    ]);
-
-    const existsInUsers = uRes.rows.length > 0;
-    const existsInStaffMembers = sRes.rows.length > 0;
-
-    if (!existsInUsers && !existsInStaffMembers) {
-      return res.status(404).json({ error: 'ID not found in users or staff_members.' });
-    }
-
-    // Disambiguation policy:
-    // 1) If client provided staff_type, use it (but ensure the id exists in that table).
-    // 2) Else if id exists in exactly one table, use that.
-    // 3) Else (exists in both and no staff_type) -> return 400 asking client to disambiguate.
-    let finalType = null;
-    if (requestedType) {
-      if (requestedType === 'user' && !existsInUsers) {
-        return res.status(400).json({ error: 'staff_type "user" provided but id not found in users.' });
-      }
-      if (requestedType === 'staff_member' && !existsInStaffMembers) {
-        return res.status(400).json({ error: 'staff_type "staff_member" provided but id not found in staff_members.' });
-      }
-      finalType = requestedType;
+    if (staffType === 'user') {
+      idColumn = 'user_id';
+      user_id_value = staffId;
+    } else if (staffType === 'staff_member') {
+      idColumn = 'staff_member_id';
+      staff_member_id_value = staffId;
     } else {
-      if (existsInUsers && !existsInStaffMembers) finalType = 'user';
-      else if (existsInStaffMembers && !existsInUsers) finalType = 'staff_member';
-      else {
-        // exists in both, and no disambiguation provided — force client to choose
-        return res.status(400).json({
-          error: 'Ambiguous id: record exists in both users and staff_members. Provide staff_type in request body ("user" or "staff_member").'
-        });
-      }
+      return res.status(400).json({ error: 'Invalid staff type provided in the URL path.' });
     }
 
-    // compute net salary
+    // 2. Compute net salary
     const netSalary =
       parseFloat(base_salary || 0) +
       parseFloat(allowances || 0) -
       parseFloat(deductions || 0);
 
-    let query, params;
-
-    if (finalType === 'user') {
-      // Upsert by user_id (unique constraint staff_salaries_user_id_key)
-      query = `
-        INSERT INTO staff_salaries (
-          user_id, staff_member_id, base_salary, allowances, deductions,
-          net_salary, salary_type, bank_name, bank_account_name,
-          account_number, tax_rate, pension_rate, updated_at
-        ) VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, CURRENT_TIMESTAMP)
-        ON CONFLICT (user_id)
-        DO UPDATE SET
-          base_salary = EXCLUDED.base_salary,
-          allowances = EXCLUDED.allowances,
-          deductions = EXCLUDED.deductions,
-          net_salary = EXCLUDED.net_salary,
-          salary_type = EXCLUDED.salary_type,
-          bank_name = EXCLUDED.bank_name,
-          bank_account_name = EXCLUDED.bank_account_name,
-          account_number = EXCLUDED.account_number,
-          tax_rate = EXCLUDED.tax_rate,
-          pension_rate = EXCLUDED.pension_rate,
-          updated_at = CURRENT_TIMESTAMP
-        RETURNING *;
-      `;
-      params = [
-        id,
-        parseFloat(base_salary || 0),
-        parseFloat(allowances || 0),
-        parseFloat(deductions || 0),
-        netSalary,
-        salary_type,
-        bank_name,
-        bank_account_name,
-        account_number,
-        parseFloat(tax_rate || 0),
-        parseFloat(pension_rate || 0)
-      ];
-    } else {
-      // finalType === 'staff_member'
-      // Upsert by staff_member_id (unique constraint staff_salaries_staff_member_id_key)
-      query = `
-        INSERT INTO staff_salaries (
-          user_id, staff_member_id, base_salary, allowances, deductions,
-          net_salary, salary_type, bank_name, bank_account_name,
-          account_number, tax_rate, pension_rate, updated_at
-        ) VALUES (NULL, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, CURRENT_TIMESTAMP)
-        ON CONFLICT (staff_member_id)
-        DO UPDATE SET
-          base_salary = EXCLUDED.base_salary,
-          allowances = EXCLUDED.allowances,
-          deductions = EXCLUDED.deductions,
-          net_salary = EXCLUDED.net_salary,
-          salary_type = EXCLUDED.salary_type,
-          bank_name = EXCLUDED.bank_name,
-          bank_account_name = EXCLUDED.bank_account_name,
-          account_number = EXCLUDED.account_number,
-          tax_rate = EXCLUDED.tax_rate,
-          pension_rate = EXCLUDED.pension_rate,
-          updated_at = CURRENT_TIMESTAMP
-        RETURNING *;
-      `;
-      params = [
-        id,
-        parseFloat(base_salary || 0),
-        parseFloat(allowances || 0),
-        parseFloat(deductions || 0),
-        netSalary,
-        salary_type,
-        bank_name,
-        bank_account_name,
-        account_number,
-        parseFloat(tax_rate || 0),
-        parseFloat(pension_rate || 0)
-      ];
-    }
+    // 3. Use a single dynamic UPSERT query
+    const query = `
+      INSERT INTO staff_salaries (
+        user_id, staff_member_id, base_salary, allowances, deductions,
+        net_salary, salary_type, bank_name, bank_account_name,
+        account_number, tax_rate, pension_rate, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CURRENT_TIMESTAMP)
+      ON CONFLICT (${idColumn})                                    /* Use the correct column for CONFLICT */
+      DO UPDATE SET
+        base_salary = EXCLUDED.base_salary,
+        allowances = EXCLUDED.allowances,
+        deductions = EXCLUDED.deductions,
+        net_salary = EXCLUDED.net_salary,
+        salary_type = EXCLUDED.salary_type,
+        bank_name = EXCLUDED.bank_name,
+        bank_account_name = EXCLUDED.bank_account_name,
+        account_number = EXCLUDED.account_number,
+        tax_rate = EXCLUDED.tax_rate,
+        pension_rate = EXCLUDED.pension_rate,
+        updated_at = CURRENT_TIMESTAMP
+      RETURNING *;
+    `;
+    
+    // Parameters: $1=user_id, $2=staff_member_id, then $3 through $12 are the salary details
+    const params = [
+      user_id_value,         // $1: ID of user (or null)
+      staff_member_id_value, // $2: ID of staff_member (or null)
+      parseFloat(base_salary || 0),
+      parseFloat(allowances || 0),
+      parseFloat(deductions || 0),
+      netSalary,
+      salary_type,
+      bank_name,
+      bank_account_name,
+      account_number,
+      parseFloat(tax_rate || 0),
+      parseFloat(pension_rate || 0)
+    ];
 
     const result = await db.query(query, params);
     return res.status(200).json(result.rows[0]);
@@ -1150,7 +1243,5 @@ router.post('/staff/staff_member/:id/salary', async (req, res) => {
     return res.status(500).json({ error: 'Failed to save salary', details: err.message });
   }
 });
-
-
 
 module.exports = router;
