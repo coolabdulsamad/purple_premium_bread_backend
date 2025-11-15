@@ -863,11 +863,9 @@ router.post('/staff/:type/:id/salary', async (req, res) => {
         ];
 
         // Build the query based on staff type
-        let updateQuery, insertQuery, whereClause, idField;
+        let updateQuery, insertQuery;
 
         if (type === 'user') {
-            idField = 'user_id';
-            whereClause = 'user_id = $11';
             updateQuery = `
                 UPDATE staff_salaries 
                 SET base_salary = $1, allowances = $2, deductions = $3, net_salary = $4,
@@ -884,8 +882,6 @@ router.post('/staff/:type/:id/salary', async (req, res) => {
                 RETURNING *
             `;
         } else {
-            idField = 'staff_member_id';
-            whereClause = 'staff_member_id = $11';
             updateQuery = `
                 UPDATE staff_salaries 
                 SET base_salary = $1, allowances = $2, deductions = $3, net_salary = $4,
@@ -905,6 +901,9 @@ router.post('/staff/:type/:id/salary', async (req, res) => {
 
         // Try to update first
         const updateValues = [...values, staffId];
+        console.log('Update query:', updateQuery);
+        console.log('Update values:', updateValues);
+
         const updateResult = await db.query(updateQuery, updateValues);
 
         if (updateResult.rows.length > 0) {
@@ -914,6 +913,9 @@ router.post('/staff/:type/:id/salary', async (req, res) => {
         } else {
             // No existing record, insert new one
             const insertValues = [staffId, ...values];
+            console.log('Insert query:', insertQuery);
+            console.log('Insert values:', insertValues);
+            
             const insertResult = await db.query(insertQuery, insertValues);
             
             console.log('Salary inserted successfully:', insertResult.rows[0]);
