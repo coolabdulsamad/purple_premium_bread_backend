@@ -103,18 +103,19 @@ router.get('/payments', async (req, res) => {
 let query = `
         SELECT 
             sp.*,
-            -- FIX: Select details from the dedicated Staff User (u_staff) or the generic User (u_generic)
-            COALESCE(u_staff.fullname, u_generic.fullname) as staff_name,
-            COALESCE(u_staff.role, u_generic.role) as staff_role,
-            COALESCE(u_staff.email, u_generic.email) as staff_email,
+            -- FIX: Prioritize details from the staff_members table (sm)
+            COALESCE(sm.fullname, u_generic.fullname) as staff_name,
+            COALESCE(sm.role, u_generic.role) as staff_role,
+            COALESCE(u_generic.email, sm.email) as staff_email, -- Email is usually in the users table, but let's check both
             paid_by_user.fullname as paid_by_name
         FROM salary_payments sp
         
-        -- 1. LEFT JOIN to the 'users' table using staff_member_id (for staff-specific details)
-        LEFT JOIN users u_staff ON sp.staff_member_id = u_staff.id
+        -- 1. LEFT JOIN to the dedicated staff_members table using staff_member_id
+        LEFT JOIN staff_members sm ON sp.staff_member_id = sm.id
         
-        -- 2. LEFT JOIN to the 'users' table using user_id (for generic user details)
-        LEFT JOIN users u_generic ON sp.user_id = u_generic.id
+        -- 2. LEFT JOIN to the generic users table using user_id or staff_member_id (for base info like email)
+        -- We join using the ID that is present in the payment record (user_id OR staff_member_id)
+        LEFT JOIN users u_generic ON u_generic.id = COALESCE(sp.user_id, sp.staff_member_id)
         
         -- 3. Standard JOIN for the admin/user who paid
         LEFT JOIN users paid_by_user ON sp.paid_by = paid_by_user.id
