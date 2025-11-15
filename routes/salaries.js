@@ -660,4 +660,217 @@ router.get('/filters/options', async (req, res) => {
     }
 });
 
+// Add these routes to your existing salaries.js file
+
+// GET /api/salaries/all-staff - Get all staff with salary information (both users and staff_members)
+router.get('/all-staff', async (req, res) => {
+    try {
+        const {
+            role,
+            search,
+            salaryType,
+            minSalary,
+            maxSalary,
+            isActive = 'true',
+            staffType
+        } = req.query;
+
+        // Query for users
+        let usersQuery = `
+            SELECT 
+                u.id, u.username, u.fullname, u.email, u.phone_number, u.role, u.is_active,
+                'user' as staff_type,
+                COALESCE(ss.base_salary, 0) as base_salary,
+                COALESCE(ss.allowances, 0) as allowances,
+                COALESCE(ss.deductions, 0) as deductions,
+                COALESCE(ss.net_salary, 0) as net_salary,
+                ss.salary_type,
+                ss.bank_name,
+                ss.account_number,
+                ss.tax_rate,
+                ss.pension_rate,
+                ss.is_active as salary_active,
+                (SELECT COUNT(*) FROM salary_payments sp WHERE sp.user_id = u.id AND sp.status = 'paid') as total_payments,
+                (SELECT MAX(payment_date) FROM salary_payments sp WHERE sp.user_id = u.id AND sp.status = 'paid') as last_payment_date,
+                (SELECT COALESCE(SUM(sl.amount), 0) FROM staff_loans sl WHERE sl.user_id = u.id AND sl.is_paid = FALSE) as outstanding_loan_amount
+            FROM users u
+            LEFT JOIN staff_salaries ss ON u.id = ss.user_id
+            WHERE u.is_active = $1
+        `;
+
+        // Query for staff members
+        let staffMembersQuery = `
+            SELECT 
+                sm.id, '' as username, sm.fullname, sm.email, sm.phone_number, 
+                COALESCE(sm.position, 'staff') as role, sm.is_active,
+                'staff_member' as staff_type,
+                COALESCE(ss.base_salary, 0) as base_salary,
+                COALESCE(ss.allowances, 0) as allowances,
+                COALESCE(ss.deductions, 0) as deductions,
+                COALESCE(ss.net_salary, 0) as net_salary,
+                ss.salary_type,
+                ss.bank_name,
+                ss.account_number,
+                ss.tax_rate,
+                ss.pension_rate,
+                ss.is_active as salary_active,
+                (SELECT COUNT(*) FROM salary_payments sp WHERE sp.staff_member_id = sm.id AND sp.status = 'paid') as total_payments,
+                (SELECT MAX(payment_date) FROM salary_payments sp WHERE sp.staff_member_id = sm.id AND sp.status = 'paid') as last_payment_date,
+                (SELECT COALESCE(SUM(sl.amount), 0) FROM staff_loans sl WHERE sl.staff_member_id = sm.id AND sl.is_paid = FALSE) as outstanding_loan_amount
+            FROM staff_members sm
+            LEFT JOIN staff_salaries ss ON sm.id = ss.staff_member_id
+            WHERE sm.is_active = $1
+        `;
+
+        const userParams = [isActive === 'true'];
+        const staffParams = [isActive === 'true'];
+        let userParamCount = 2;
+        let staffParamCount = 2;
+
+        // Add filters to both queries
+        const addFilters = (query, params, paramCount, staffType) => {
+            if (role && staffType !== 'staff_member') {
+                query += ` AND u.role = $${paramCount}`;
+                params.push(role);
+                paramCount++;
+            } else if (role && staffType === 'staff_member') {
+                query += ` AND sm.position = $${paramCount}`;
+                params.push(role);
+                paramCount++;
+            }
+
+            if (search && staffType !== 'staff_member') {
+                query += ` AND (u.fullname ILIKE $${paramCount} OR u.email ILIKE $${paramCount} OR u.username ILIKE $${paramCount})`;
+                params.push(`%${search}%`);
+                paramCount++;
+            } else if (search && staffType === 'staff_member') {
+                query += ` AND (sm.fullname ILIKE $${paramCount} OR sm.email ILIKE $${paramCount})`;
+                params.push(`%${search}%`);
+                paramCount++;
+            }
+
+            if (salaryType) {
+                query += ` AND ss.salary_type = $${paramCount}`;
+                params.push(salaryType);
+                paramCount++;
+            }
+
+            if (minSalary) {
+                query += ` AND COALESCE(ss.net_salary, 0) >= $${paramCount}`;
+                params.push(parseFloat(minSalary));
+                paramCount++;
+            }
+
+            if (maxSalary) {
+                query += ` AND COALESCE(ss.net_salary, 0) <= $${paramCount}`;
+                params.push(parseFloat(maxSalary));
+                paramCount++;
+            }
+
+            return { query, params, paramCount };
+        };
+
+        // Apply filters to both queries
+        let usersResult = addFilters(usersQuery, userParams, userParamCount, 'user');
+        let staffResult = addFilters(staffMembersQuery, staffParams, staffParamCount, 'staff_member');
+
+        usersQuery = usersResult.query + ` ORDER BY u.fullname`;
+        staffMembersQuery = staffResult.query + ` ORDER BY sm.fullname`;
+
+        // Execute queries
+        const [usersData, staffMembersData] = await Promise.all([
+            db.query(usersQuery, usersResult.params),
+            db.query(staffMembersQuery, staffResult.params)
+        ]);
+
+        // Combine results
+        let allStaff = [
+            ...usersData.rows,
+            ...staffMembersData.rows
+        ];
+
+        // Filter by staff type if specified
+        if (staffType) {
+            allStaff = allStaff.filter(staff => staff.staff_type === staffType);
+        }
+
+        res.status(200).json(allStaff);
+    } catch (error) {
+        console.error('Error fetching all staff salaries:', error);
+        res.status(500).json({ error: 'Failed to fetch staff salaries.', details: error.message });
+    }
+});
+
+// Update the staff salary route to handle both user types
+router.post('/staff/:type/:id/salary', async (req, res) => {
+    const { type, id } = req.params; // type can be 'user' or 'staff_member'
+    const {
+        base_salary,
+        allowances,
+        deductions,
+        salary_type,
+        bank_name,
+        account_number,
+        tax_rate,
+        pension_rate
+    } = req.body;
+
+    try {
+        // Validate staff exists based on type
+        let checkQuery = '';
+        if (type === 'user') {
+            checkQuery = 'SELECT id FROM users WHERE id = $1';
+        } else {
+            checkQuery = 'SELECT id FROM staff_members WHERE id = $1';
+        }
+
+        const checkResult = await db.query(checkQuery, [id]);
+        if (checkResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Staff member not found.' });
+        }
+
+        // Calculate net salary
+        const netSalary = parseFloat(base_salary) + parseFloat(allowances || 0) - parseFloat(deductions || 0);
+
+        const query = `
+            INSERT INTO staff_salaries (
+                ${type === 'user' ? 'user_id' : 'staff_member_id'}, 
+                base_salary, allowances, deductions, net_salary,
+                salary_type, bank_name, account_number, tax_rate, pension_rate
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (${type === 'user' ? 'user_id' : 'staff_member_id'}) 
+            DO UPDATE SET
+                base_salary = EXCLUDED.base_salary,
+                allowances = EXCLUDED.allowances,
+                deductions = EXCLUDED.deductions,
+                net_salary = EXCLUDED.net_salary,
+                salary_type = EXCLUDED.salary_type,
+                bank_name = EXCLUDED.bank_name,
+                account_number = EXCLUDED.account_number,
+                tax_rate = EXCLUDED.tax_rate,
+                pension_rate = EXCLUDED.pension_rate,
+                updated_at = CURRENT_TIMESTAMP
+            RETURNING *
+        `;
+
+        const result = await db.query(query, [
+            id,
+            parseFloat(base_salary),
+            parseFloat(allowances || 0),
+            parseFloat(deductions || 0),
+            netSalary,
+            salary_type,
+            bank_name,
+            account_number,
+            parseFloat(tax_rate || 0),
+            parseFloat(pension_rate || 0)
+        ]);
+
+        res.status(200).json(result.rows[0]);
+    } catch (error) {
+        console.error('Error updating staff salary:', error);
+        res.status(500).json({ error: 'Failed to update staff salary.', details: error.message });
+    }
+});
+
 module.exports = router;
