@@ -252,34 +252,89 @@ let query = `
 });
 
 // GET /api/salaries/payments/:id - Get single payment details
+// router.get('/payments/:id', async (req, res) => {
+//     const { id } = req.params;
+//     try {
+//         const paymentQuery = `
+//             SELECT 
+//                 sp.*,
+//                 u.fullname as staff_name,
+//                 u.role as staff_role,
+//                 u.email as staff_email,
+//                 u.phone_number as staff_phone,
+//                 paid_by_user.fullname as paid_by_name,
+//                 paid_by_user.email as paid_by_email
+//             FROM salary_payments sp
+//             JOIN users u ON sp.user_id = u.id
+//             LEFT JOIN users paid_by_user ON sp.paid_by = paid_by_user.id
+//             WHERE sp.id = $1
+//         `;
+
+//         const paymentResult = await db.query(paymentQuery, [id]);
+
+//         if (paymentResult.rows.length === 0) {
+//             return res.status(404).json({ error: 'Salary payment not found.' });
+//         }
+
+//         res.status(200).json(paymentResult.rows[0]);
+//     } catch (error) {
+//         console.error('Error fetching payment details:', error);
+//         res.status(500).json({ error: 'Failed to fetch payment details.', details: error.message });
+//     }
+// });
+
+// routes/salaries.js
+
+// GET /api/salaries/payments/:id - Get single salary payment details
 router.get('/payments/:id', async (req, res) => {
-    const { id } = req.params;
+    const paymentId = req.params.id;
+
+    if (isNaN(parseInt(paymentId))) {
+        return res.status(400).json({ error: 'Invalid payment ID.' });
+    }
+    
     try {
-        const paymentQuery = `
+        const client = await db.getClient();
+        
+        const query = `
             SELECT 
                 sp.*,
-                u.fullname as staff_name,
-                u.role as staff_role,
-                u.email as staff_email,
-                u.phone_number as staff_phone,
-                paid_by_user.fullname as paid_by_name,
-                paid_by_user.email as paid_by_email
+                -- 1. Fullname: Prioritize staff_members name (sm) over generic user name (u)
+                COALESCE(sm.fullname, u.fullname) as staff_name,
+                
+                -- 2. Role: Use sm.position (if staff) or u.role (if user)
+                COALESCE(sm.position, u.role) as staff_role,
+                
+                -- 3. Email: Safe fallback from users table (u)
+                COALESCE(u.email, sm.email) as staff_email,
+                
+                paid_by_user.fullname as paid_by_name
             FROM salary_payments sp
-            JOIN users u ON sp.user_id = u.id
+            
+            -- 1. LEFT JOIN for staff members (sm) - links using staff_member_id
+            LEFT JOIN staff_members sm ON sp.staff_member_id = sm.id
+            
+            -- 2. LEFT JOIN for generic users (u) - links using user_id
+            LEFT JOIN users u ON sp.user_id = u.id
+            
+            -- 3. Standard JOIN for the admin/user who paid
             LEFT JOIN users paid_by_user ON sp.paid_by = paid_by_user.id
+            
             WHERE sp.id = $1
         `;
 
-        const paymentResult = await db.query(paymentQuery, [id]);
+        const result = await client.query(query, [paymentId]);
+        client.release();
 
-        if (paymentResult.rows.length === 0) {
+        if (result.rows.length === 0) {
             return res.status(404).json({ error: 'Salary payment not found.' });
         }
 
-        res.status(200).json(paymentResult.rows[0]);
+        res.json(result.rows[0]);
+
     } catch (error) {
-        console.error('Error fetching payment details:', error);
-        res.status(500).json({ error: 'Failed to fetch payment details.', details: error.message });
+        console.error('Error fetching salary payment details:', error);
+        res.status(500).json({ error: 'Failed to fetch salary payment details.', details: error.message });
     }
 });
 
