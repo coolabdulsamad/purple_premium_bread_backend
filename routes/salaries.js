@@ -994,6 +994,7 @@ router.get('/all-staff', async (req, res) => {
 // });
 
 // POST /api/salaries/staff/staff_member/:id/salary - Update staff salary
+
 router.post('/staff/staff_member/:id/salary', async (req, res) => {
     const { id } = req.params;
 
@@ -1010,61 +1011,116 @@ router.post('/staff/staff_member/:id/salary', async (req, res) => {
     } = req.body;
 
     try {
-        // Check staff exists
-        const userCheck = await db.query('SELECT id FROM users WHERE id = $1', [id]);
-        if (userCheck.rows.length === 0) {
-            return res.status(404).json({ error: 'Staff member not found.' });
+        // Check identity type
+        const checkUser = await db.query('SELECT id FROM users WHERE id = $1', [id]);
+        const checkStaffMember = await db.query('SELECT id FROM staff_members WHERE id = $1', [id]);
+
+        let isUser = false;
+        let isStaffMember = false;
+
+        if (checkUser.rows.length > 0) isUser = true;
+        if (checkStaffMember.rows.length > 0) isStaffMember = true;
+
+        if (!isUser && !isStaffMember) {
+            return res.status(404).json({ error: 'ID not found in users or staff_members' });
         }
 
-        // Calculate net salary
+        // Salary calculation
         const netSalary =
             parseFloat(base_salary || 0) +
             parseFloat(allowances || 0) -
             parseFloat(deductions || 0);
 
-        const query = `
-            INSERT INTO staff_salaries (
-                user_id, base_salary, allowances, deductions, net_salary,
-                salary_type, bank_name, bank_account_name, account_number,
-                tax_rate, pension_rate
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-            ON CONFLICT (user_id)
-            DO UPDATE SET
-                base_salary = EXCLUDED.base_salary,
-                allowances = EXCLUDED.allowances,
-                deductions = EXCLUDED.deductions,
-                net_salary = EXCLUDED.net_salary,
-                salary_type = EXCLUDED.salary_type,
-                bank_name = EXCLUDED.bank_name,
-                bank_account_name = EXCLUDED.bank_account_name,
-                account_number = EXCLUDED.account_number,
-                tax_rate = EXCLUDED.tax_rate,
-                pension_rate = EXCLUDED.pension_rate,
-                updated_at = CURRENT_TIMESTAMP
-            RETURNING *
-        `;
+        let result;
 
-        const result = await db.query(query, [
-            id,
-            parseFloat(base_salary || 0),
-            parseFloat(allowances || 0),
-            parseFloat(deductions || 0),
-            netSalary,
-            salary_type,
-            bank_name,
-            bank_account_name,
-            account_number,
-            parseFloat(tax_rate || 0),
-            parseFloat(pension_rate || 0)
-        ]);
+        if (isUser) {
+            // Insert/Update for USER
+            const query = `
+                INSERT INTO staff_salaries (
+                    user_id, staff_member_id, base_salary, allowances, deductions,
+                    net_salary, salary_type, bank_name, bank_account_name,
+                    account_number, tax_rate, pension_rate, updated_at
+                )
+                VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, CURRENT_TIMESTAMP)
+                ON CONFLICT (user_id)
+                DO UPDATE SET
+                    base_salary = EXCLUDED.base_salary,
+                    allowances = EXCLUDED.allowances,
+                    deductions = EXCLUDED.deductions,
+                    net_salary = EXCLUDED.net_salary,
+                    salary_type = EXCLUDED.salary_type,
+                    bank_name = EXCLUDED.bank_name,
+                    bank_account_name = EXCLUDED.bank_account_name,
+                    account_number = EXCLUDED.account_number,
+                    tax_rate = EXCLUDED.tax_rate,
+                    pension_rate = EXCLUDED.pension_rate,
+                    updated_at = CURRENT_TIMESTAMP
+                RETURNING *;
+            `;
+
+            result = await db.query(query, [
+                id,
+                base_salary,
+                allowances,
+                deductions,
+                netSalary,
+                salary_type,
+                bank_name,
+                bank_account_name,
+                account_number,
+                tax_rate,
+                pension_rate
+            ]);
+        }
+
+        if (isStaffMember) {
+            // Insert/Update for STAFF_MEMBER
+            const query = `
+                INSERT INTO staff_salaries (
+                    user_id, staff_member_id, base_salary, allowances, deductions,
+                    net_salary, salary_type, bank_name, bank_account_name,
+                    account_number, tax_rate, pension_rate, updated_at
+                )
+                VALUES (NULL, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, CURRENT_TIMESTAMP)
+                ON CONFLICT (staff_member_id)
+                DO UPDATE SET
+                    base_salary = EXCLUDED.base_salary,
+                    allowances = EXCLUDED.allowances,
+                    deductions = EXCLUDED.deductions,
+                    net_salary = EXCLUDED.net_salary,
+                    salary_type = EXCLUDED.salary_type,
+                    bank_name = EXCLUDED.bank_name,
+                    bank_account_name = EXCLUDED.bank_account_name,
+                    account_number = EXCLUDED.account_number,
+                    tax_rate = EXCLUDED.tax_rate,
+                    pension_rate = EXCLUDED.pension_rate,
+                    updated_at = CURRENT_TIMESTAMP
+                RETURNING *;
+            `;
+
+            result = await db.query(query, [
+                id,
+                base_salary,
+                allowances,
+                deductions,
+                netSalary,
+                salary_type,
+                bank_name,
+                bank_account_name,
+                account_number,
+                tax_rate,
+                pension_rate
+            ]);
+        }
 
         res.status(200).json(result.rows[0]);
 
     } catch (error) {
-        console.error('Error updating salary:', error);
+        console.error('Salary update error:', error);
         res.status(500).json({ error: 'Failed to update salary', details: error.message });
     }
 });
+
 
 
 module.exports = router;
