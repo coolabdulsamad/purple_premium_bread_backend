@@ -431,13 +431,22 @@ router.post('/payments', authenticate, async (req, res) => {
 
         // Update loan status if loans were deducted
         // (This part remains correct, assuming loan table uses user_id or staff_member_id consistently)
+// Update loan status if loans were deducted
         if (loan_ids && loan_ids.length > 0 && parseFloat(loan_deduction || 0) > 0) {
+            // Determine which ID column holds the staff/user ID for the loan update check
+            // We use COALESCE to get the correct ID whether it's for user or staff_member
+            const loan_check_id = payment_user_id || payment_staff_member_id;
+
             const loanUpdateQuery = `
                 UPDATE staff_loans
                 SET is_paid = TRUE, deducted_on_payment_id = $1, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ANY($2) AND user_id = $3 AND is_paid = FALSE
+                WHERE id = ANY($2) 
+                  -- FIX: Use COALESCE to check against whichever column holds the ID
+                  AND COALESCE(user_id, staff_member_id) = $3 
+                  AND is_paid = FALSE
             `;
-            await client.query(loanUpdateQuery, [newPaymentId, loan_ids, user_id]);
+            // NOTE: $3 is the actual ID we received, which is loan_check_id
+            await client.query(loanUpdateQuery, [newPaymentId, loan_ids, loan_check_id]);
         }
 
         await client.query('COMMIT');
