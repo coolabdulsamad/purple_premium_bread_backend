@@ -100,18 +100,21 @@ router.get('/payments', async (req, res) => {
             limit = 50
         } = req.query;
 
-        let query = `
-            SELECT 
-                sp.*,
-                u.fullname as staff_name,
-                u.role as staff_role,
-                u.email as staff_email,
-                paid_by_user.fullname as paid_by_name
-            FROM salary_payments sp
-            JOIN users u ON sp.user_id = u.id
-            LEFT JOIN users paid_by_user ON sp.paid_by = paid_by_user.id
-            WHERE 1=1
-        `;
+let query = `
+        SELECT 
+            sp.*,
+            u.fullname as staff_name,
+            u.role as staff_role,
+            u.email as staff_email,
+            paid_by_user.fullname as paid_by_name
+        FROM salary_payments sp
+        
+        -- FIX: Use COALESCE to join to the 'users' table using whichever ID column is NOT NULL (user_id or staff_member_id)
+        JOIN users u ON u.id = COALESCE(sp.user_id, sp.staff_member_id)
+        
+        LEFT JOIN users paid_by_user ON sp.paid_by = paid_by_user.id
+        WHERE 1=1
+    `;
         const params = [];
         let paramCount = 1;
 
