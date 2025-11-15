@@ -801,43 +801,29 @@ router.get('/all-staff', async (req, res) => {
     }
 });
 
-// Update the staff salary route to handle both user types
 router.post('/staff/:type/:id/salary', async (req, res) => {
-    const { type, id } = req.params; // type can be 'user' or 'staff_member'
+    const { type, id } = req.params;
     const {
         base_salary,
         allowances,
         deductions,
         salary_type,
         bank_name,
+        bank_account_name, // Add this
         account_number,
         tax_rate,
         pension_rate
     } = req.body;
 
     try {
-        // Validate staff exists based on type
-        let checkQuery = '';
-        if (type === 'user') {
-            checkQuery = 'SELECT id FROM users WHERE id = $1';
-        } else {
-            checkQuery = 'SELECT id FROM staff_members WHERE id = $1';
-        }
-
-        const checkResult = await db.query(checkQuery, [id]);
-        if (checkResult.rows.length === 0) {
-            return res.status(404).json({ error: 'Staff member not found.' });
-        }
-
-        // Calculate net salary
-        const netSalary = parseFloat(base_salary) + parseFloat(allowances || 0) - parseFloat(deductions || 0);
+        // ... existing validation code ...
 
         const query = `
             INSERT INTO staff_salaries (
                 ${type === 'user' ? 'user_id' : 'staff_member_id'}, 
                 base_salary, allowances, deductions, net_salary,
-                salary_type, bank_name, account_number, tax_rate, pension_rate
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                salary_type, bank_name, bank_account_name, account_number, tax_rate, pension_rate
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT (${type === 'user' ? 'user_id' : 'staff_member_id'}) 
             DO UPDATE SET
                 base_salary = EXCLUDED.base_salary,
@@ -846,6 +832,7 @@ router.post('/staff/:type/:id/salary', async (req, res) => {
                 net_salary = EXCLUDED.net_salary,
                 salary_type = EXCLUDED.salary_type,
                 bank_name = EXCLUDED.bank_name,
+                bank_account_name = EXCLUDED.bank_account_name, // Add this
                 account_number = EXCLUDED.account_number,
                 tax_rate = EXCLUDED.tax_rate,
                 pension_rate = EXCLUDED.pension_rate,
@@ -861,6 +848,7 @@ router.post('/staff/:type/:id/salary', async (req, res) => {
             netSalary,
             salary_type,
             bank_name,
+            bank_account_name, // Add this
             account_number,
             parseFloat(tax_rate || 0),
             parseFloat(pension_rate || 0)
