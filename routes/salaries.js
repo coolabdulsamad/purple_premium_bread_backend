@@ -342,6 +342,7 @@ router.post('/payments', authenticate, async (req, res) => {
 
     const {
         user_id,
+        staff_type, // <--- NEW: FIELD TO DETERMINE WHICH ID COLUMN TO USE
         salary_period,
         payment_date,
         base_salary,
@@ -358,7 +359,7 @@ router.post('/payments', authenticate, async (req, res) => {
     } = req.body;
 
     console.log('Payment data received:', {
-        user_id, salary_period, payment_date, base_salary, allowances,
+        user_id, staff_type, salary_period, payment_date, base_salary, allowances,
         deductions, tax_amount, pension_amount, net_amount, loan_deduction
     });
 
@@ -370,10 +371,25 @@ router.post('/payments', authenticate, async (req, res) => {
     try {
         await client.query('BEGIN');
 
-        // Calculate gross amount from base_salary + allowances
+        // --- START FIX: Determine which ID column to set ---
+        const staffID = parseInt(user_id);
+        let payment_user_id = null;
+        let payment_staff_member_id = null;
+
+        if (staff_type && String(staff_type).toLowerCase() === 'staff_member') {
+            // Payment is for a staff member, populate staff_member_id
+            payment_staff_member_id = staffID;
+        } else {
+            // Payment is for a generic user (or type is missing), populate user_id
+            payment_user_id = staffID;
+        }
+        // --- END FIX ---
+
+
+        // Calculate gross amount
         const gross_amount = parseFloat(base_salary || 0) + parseFloat(allowances || 0);
 
-        // Calculate total deductions (including tax, pension, other deductions, and loans)
+        // Calculate total deductions
         const total_deductions = parseFloat(deductions || 0) +
             parseFloat(tax_amount || 0) +
             parseFloat(pension_amount || 0) +
@@ -381,37 +397,40 @@ router.post('/payments', authenticate, async (req, res) => {
 
         console.log('Calculated values:', { gross_amount, total_deductions });
 
-        // Insert the Salary Payment with all fields
+        // Insert the Salary Payment with all fields (updated to include staff_member_id)
+        // NOTE: Parameter indices shift by 1 due to the new column
         const paymentQuery = `
             INSERT INTO salary_payments 
-                (user_id, salary_period, payment_date, base_salary, allowances, 
+                (user_id, staff_member_id, salary_period, payment_date, base_salary, allowances, 
                  deductions, tax_amount, pension_amount, net_amount, gross_amount,
                  payment_method, payment_reference, notes, paid_by, status, created_at, loan_deduction)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'paid', CURRENT_TIMESTAMP, $15)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'paid', CURRENT_TIMESTAMP, $16)
             RETURNING id
         `;
 
         const paymentResult = await client.query(paymentQuery, [
-            user_id,
-            salary_period || payment_date,
-            payment_date,
-            parseFloat(base_salary || 0),
-            parseFloat(allowances || 0),
-            parseFloat(deductions || 0), // This is "other deductions"
-            parseFloat(tax_amount || 0),
-            parseFloat(pension_amount || 0),
-            parseFloat(net_amount),
-            gross_amount, // Calculated gross amount
-            payment_method,
-            payment_reference,
-            notes,
-            paid_by,
-            parseFloat(loan_deduction || 0)
+            payment_user_id,            // $1: ID of user (or null) - FIX
+            payment_staff_member_id,    // $2: ID of staff_member (or null) - FIX
+            salary_period || payment_date, // $3: was $2
+            payment_date,                // $4: was $3
+            parseFloat(base_salary || 0), // $5: was $4
+            parseFloat(allowances || 0),  // $6: was $5
+            parseFloat(deductions || 0),  // $7: was $6
+            parseFloat(tax_amount || 0),  // $8: was $7
+            parseFloat(pension_amount || 0), // $9: was $8
+            parseFloat(net_amount),      // $10: was $9
+            gross_amount,                // $11: was $10
+            payment_method,              // $12: was $11
+            payment_reference,           // $13: was $12
+            notes,                       // $14: was $13
+            paid_by,                     // $15: was $14
+            parseFloat(loan_deduction || 0) // $16: was $15
         ]);
 
         const newPaymentId = paymentResult.rows[0].id;
 
         // Update loan status if loans were deducted
+        // (This part remains correct, assuming loan table uses user_id or staff_member_id consistently)
         if (loan_ids && loan_ids.length > 0 && parseFloat(loan_deduction || 0) > 0) {
             const loanUpdateQuery = `
                 UPDATE staff_loans
@@ -423,11 +442,15 @@ router.post('/payments', authenticate, async (req, res) => {
 
         await client.query('COMMIT');
 
-        // Return the complete payment record
+        // Return the complete payment record (FIXED JOIN)
         const completePaymentQuery = `
-            SELECT sp.*, u.fullname as staff_name, u.role as staff_role
+            SELECT 
+                sp.*, 
+                u.fullname as staff_name, 
+                u.role as staff_role
             FROM salary_payments sp
-            JOIN users u ON sp.user_id = u.id
+            -- FIX: Join the 'users' table using whichever ID column is NOT NULL
+            JOIN users u ON u.id = COALESCE(sp.user_id, sp.staff_member_id) 
             WHERE sp.id = $1
         `;
         const completeResult = await client.query(completePaymentQuery, [newPaymentId]);
