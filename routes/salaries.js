@@ -547,9 +547,12 @@ router.post('/payments', authenticate, async (req, res) => {
 // POST /api/salaries/loans - Record a new staff loan/advance
 router.post('/loans', authenticate, async (req, res) => {
     const { user_id, loan_date, amount, reason } = req.body;
+    
+    // Rename user_id from the body to borrower_id for clarity
+    const borrower_id = user_id;
 
-    if (!user_id || !loan_date || !amount) {
-        return res.status(400).json({ error: 'Missing required fields: user_id, loan_date, and amount.' });
+    if (!borrower_id || !loan_date || !amount) {
+        return res.status(400).json({ error: 'Missing required fields: borrower_id, loan_date, and amount.' });
     }
 
     if (parseFloat(amount) <= 0) {
@@ -557,24 +560,20 @@ router.post('/loans', authenticate, async (req, res) => {
     }
 
     try {
-        const client = await db.getClient(); // Use client for transaction/multi-step logic
-
-        let user_id_value = null;
+        const client = await db.getClient();
+        
         let staff_member_id_value = null;
 
-        // --- 1. Determine if the ID is a staff member ID ---
+        // 1. Check if the ID exists in the staff_members table
         const staffCheckQuery = `SELECT id FROM staff_members WHERE id = $1`;
-        const staffCheckResult = await client.query(staffCheckQuery, [user_id]);
+        const staffCheckResult = await client.query(staffCheckQuery, [borrower_id]);
 
         if (staffCheckResult.rows.length > 0) {
-            // If found in staff_members, use the staff_member_id column
-            staff_member_id_value = user_id;
-        } else {
-            // Otherwise, assume it's a generic user ID
-            user_id_value = user_id;
-        }
+            // If it is a staff member, set the staff_member_id column.
+            staff_member_id_value = borrower_id;
+        } 
         
-        // --- 2. Insert into the correct column ---
+        // 2. The borrower_id is always stored in the user_id column to satisfy the NOT NULL constraint.
         const query = `
             INSERT INTO staff_loans 
                 (user_id, staff_member_id, loan_date, amount, reason, created_at)
@@ -582,18 +581,21 @@ router.post('/loans', authenticate, async (req, res) => {
             RETURNING *
         `;
         const result = await client.query(query, [
-            user_id_value, 
-            staff_member_id_value, 
+            borrower_id,                // $1: Always populates user_id (required)
+            staff_member_id_value,      // $2: Null or the ID (optional staff key)
             loan_date, 
             parseFloat(amount), 
             reason
         ]);
         
-        client.release(); // Release the client back to the pool
+        client.release();
         res.status(201).json(result.rows[0]);
     } catch (error) {
         console.error('Error recording staff loan:', error);
-        res.status(500).json({ error: 'Failed to record staff loan.', details: error.message });
+        res.status(500).json({ 
+            error: 'Failed to record staff loan.', 
+            details: error.message 
+        });
     }
 });
 
@@ -609,23 +611,19 @@ router.get('/loans', async (req, res) => {
             limit = 50
         } = req.query;
 
-        let query = `
-            SELECT 
-                sl.*,
-                -- FIX: Conditional join logic
-                COALESCE(sm.fullname, u.fullname) as borrower_name,
-                COALESCE(sm.position, u.role) as borrower_role,
-                COALESCE(u.email, sm.email) as borrower_email,
-                
-                sp.payment_date as deducted_date
-            FROM staff_loans sl
-            -- FIX: Use two LEFT JOINs for conditional lookup
-            LEFT JOIN staff_members sm ON sl.staff_member_id = sm.id
-            LEFT JOIN users u ON sl.user_id = u.id
-            
-            LEFT JOIN salary_payments sp ON sl.deducted_on_payment_id = sp.id
-            WHERE 1=1
-        `;
+let query = `
+    SELECT 
+        sl.*,
+        COALESCE(sm.fullname, u.fullname) as borrower_name,
+        COALESCE(sm.position, u.role) as borrower_role,
+        COALESCE(u.email, sm.email) as borrower_email,
+        sp.payment_date as deducted_date
+    FROM staff_loans sl
+    LEFT JOIN staff_members sm ON sl.staff_member_id = sm.id  // Staff join
+    LEFT JOIN users u ON sl.user_id = u.id                     // User join
+    LEFT JOIN salary_payments sp ON sl.deducted_on_payment_id = sp.id
+    WHERE 1=1
+`;
 
         const params = [];
         let paramCount = 1;
