@@ -338,19 +338,19 @@ router.post('/payments', authenticate, async (req, res) => {
     if (!paid_by || isNaN(paid_by)) {
         return res.status(403).json({ error: 'Unauthorized', details: 'Authenticated user ID is missing or invalid.' });
     }
-    
-    const { 
-        user_id, 
+
+    const {
+        user_id,
         salary_period,
-        payment_date, 
+        payment_date,
         base_salary,
         allowances,
         deductions,
         tax_amount,
         pension_amount,
-        net_amount, 
-        payment_method, 
-        payment_reference, 
+        net_amount,
+        payment_method,
+        payment_reference,
         notes,
         loan_deduction,
         loan_ids
@@ -371,12 +371,12 @@ router.post('/payments', authenticate, async (req, res) => {
 
         // Calculate gross amount from base_salary + allowances
         const gross_amount = parseFloat(base_salary || 0) + parseFloat(allowances || 0);
-        
+
         // Calculate total deductions (including tax, pension, other deductions, and loans)
-        const total_deductions = parseFloat(deductions || 0) + 
-                                parseFloat(tax_amount || 0) + 
-                                parseFloat(pension_amount || 0) +
-                                parseFloat(loan_deduction || 0);
+        const total_deductions = parseFloat(deductions || 0) +
+            parseFloat(tax_amount || 0) +
+            parseFloat(pension_amount || 0) +
+            parseFloat(loan_deduction || 0);
 
         console.log('Calculated values:', { gross_amount, total_deductions });
 
@@ -389,7 +389,7 @@ router.post('/payments', authenticate, async (req, res) => {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'paid', CURRENT_TIMESTAMP, $15)
             RETURNING id
         `;
-        
+
         const paymentResult = await client.query(paymentQuery, [
             user_id,
             salary_period || payment_date,
@@ -407,7 +407,7 @@ router.post('/payments', authenticate, async (req, res) => {
             paid_by,
             parseFloat(loan_deduction || 0)
         ]);
-        
+
         const newPaymentId = paymentResult.rows[0].id;
 
         // Update loan status if loans were deducted
@@ -421,7 +421,7 @@ router.post('/payments', authenticate, async (req, res) => {
         }
 
         await client.query('COMMIT');
-        
+
         // Return the complete payment record
         const completePaymentQuery = `
             SELECT sp.*, u.fullname as staff_name, u.role as staff_role
@@ -430,7 +430,7 @@ router.post('/payments', authenticate, async (req, res) => {
             WHERE sp.id = $1
         `;
         const completeResult = await client.query(completePaymentQuery, [newPaymentId]);
-        
+
         res.status(201).json(completeResult.rows[0]);
 
     } catch (error) {
@@ -472,13 +472,13 @@ router.post('/loans', authenticate, async (req, res) => {
 // GET /api/salaries/loans - Get all loans with filters
 router.get('/loans', async (req, res) => {
     try {
-        const { 
-            userId, 
-            status, 
-            startDate, 
-            endDate, 
-            page = 1, 
-            limit = 50 
+        const {
+            userId,
+            status,
+            startDate,
+            endDate,
+            page = 1,
+            limit = 50
         } = req.query;
 
         let query = `
@@ -493,7 +493,7 @@ router.get('/loans', async (req, res) => {
             LEFT JOIN salary_payments sp ON sl.deducted_on_payment_id = sp.id
             WHERE 1=1
         `;
-        
+
         const params = [];
         let paramCount = 1;
 
@@ -528,7 +528,7 @@ router.get('/loans', async (req, res) => {
 
         // Add ordering and pagination
         query += ` ORDER BY sl.loan_date DESC, sl.created_at DESC`;
-        
+
         const offset = (page - 1) * limit;
         query += ` LIMIT $${paramCount} OFFSET $${paramCount + 1}`;
         params.push(parseInt(limit), offset);
@@ -710,6 +710,7 @@ router.get('/all-staff', async (req, res) => {
                 COALESCE(ss.net_salary, 0) as net_salary,
                 ss.salary_type,
                 ss.bank_name,
+                ss.bank_account_name, -- Add this
                 ss.account_number,
                 ss.tax_rate,
                 ss.pension_rate,
