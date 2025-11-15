@@ -546,13 +546,11 @@ router.post('/payments', authenticate, async (req, res) => {
 
 // POST /api/salaries/loans - Record a new staff loan/advance
 router.post('/loans', authenticate, async (req, res) => {
-    const { user_id, loan_date, amount, reason } = req.body;
-    
-    // Rename user_id from the body to borrower_id for clarity
-    const borrower_id = user_id;
+    // We use user_id from the body as the generic borrower_id
+    const { user_id: borrower_id, loan_date, amount, reason } = req.body; 
 
     if (!borrower_id || !loan_date || !amount) {
-        return res.status(400).json({ error: 'Missing required fields: borrower_id, loan_date, and amount.' });
+        return res.status(400).json({ error: 'Missing required fields: user_id (borrower_id), loan_date, and amount.' });
     }
 
     if (parseFloat(amount) <= 0) {
@@ -563,17 +561,20 @@ router.post('/loans', authenticate, async (req, res) => {
         const client = await db.getClient();
         
         let staff_member_id_value = null;
+        // borrower_id must always go into user_id because the column is NOT NULL
+        const user_id_value = borrower_id; 
 
         // 1. Check if the ID exists in the staff_members table
         const staffCheckQuery = `SELECT id FROM staff_members WHERE id = $1`;
         const staffCheckResult = await client.query(staffCheckQuery, [borrower_id]);
 
         if (staffCheckResult.rows.length > 0) {
-            // If it is a staff member, set the staff_member_id column.
+            // 2. If it is a staff member, duplicate the ID in staff_member_id
+            // This is the necessary redundancy to identify them as staff later.
             staff_member_id_value = borrower_id;
         } 
         
-        // 2. The borrower_id is always stored in the user_id column to satisfy the NOT NULL constraint.
+        // 3. Insert into the correct columns
         const query = `
             INSERT INTO staff_loans 
                 (user_id, staff_member_id, loan_date, amount, reason, created_at)
@@ -581,8 +582,8 @@ router.post('/loans', authenticate, async (req, res) => {
             RETURNING *
         `;
         const result = await client.query(query, [
-            borrower_id,                // $1: Always populates user_id (required)
-            staff_member_id_value,      // $2: Null or the ID (optional staff key)
+            user_id_value,              // $1: Always the borrower_id (satisfies NOT NULL)
+            staff_member_id_value,      // $2: Null OR the borrower_id (identifies staff)
             loan_date, 
             parseFloat(amount), 
             reason
