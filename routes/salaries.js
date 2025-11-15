@@ -557,13 +557,39 @@ router.post('/loans', authenticate, async (req, res) => {
     }
 
     try {
+        const client = await db.getClient(); // Use client for transaction/multi-step logic
+
+        let user_id_value = null;
+        let staff_member_id_value = null;
+
+        // --- 1. Determine if the ID is a staff member ID ---
+        const staffCheckQuery = `SELECT id FROM staff_members WHERE id = $1`;
+        const staffCheckResult = await client.query(staffCheckQuery, [user_id]);
+
+        if (staffCheckResult.rows.length > 0) {
+            // If found in staff_members, use the staff_member_id column
+            staff_member_id_value = user_id;
+        } else {
+            // Otherwise, assume it's a generic user ID
+            user_id_value = user_id;
+        }
+        
+        // --- 2. Insert into the correct column ---
         const query = `
             INSERT INTO staff_loans 
-                (user_id, loan_date, amount, reason, created_at)
-            VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+                (user_id, staff_member_id, loan_date, amount, reason, created_at)
+            VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
             RETURNING *
         `;
-        const result = await db.query(query, [user_id, loan_date, parseFloat(amount), reason]);
+        const result = await client.query(query, [
+            user_id_value, 
+            staff_member_id_value, 
+            loan_date, 
+            parseFloat(amount), 
+            reason
+        ]);
+        
+        client.release(); // Release the client back to the pool
         res.status(201).json(result.rows[0]);
     } catch (error) {
         console.error('Error recording staff loan:', error);
@@ -586,12 +612,17 @@ router.get('/loans', async (req, res) => {
         let query = `
             SELECT 
                 sl.*,
-                u.fullname as staff_name,
-                u.role as staff_role,
-                u.email as staff_email,
+                -- FIX: Conditional join logic
+                COALESCE(sm.fullname, u.fullname) as borrower_name,
+                COALESCE(sm.position, u.role) as borrower_role,
+                COALESCE(u.email, sm.email) as borrower_email,
+                
                 sp.payment_date as deducted_date
             FROM staff_loans sl
-            JOIN users u ON sl.user_id = u.id
+            -- FIX: Use two LEFT JOINs for conditional lookup
+            LEFT JOIN staff_members sm ON sl.staff_member_id = sm.id
+            LEFT JOIN users u ON sl.user_id = u.id
+            
             LEFT JOIN salary_payments sp ON sl.deducted_on_payment_id = sp.id
             WHERE 1=1
         `;
@@ -600,11 +631,13 @@ router.get('/loans', async (req, res) => {
         let paramCount = 1;
 
         if (userId) {
-            query += ` AND sl.user_id = $${paramCount}`;
+            // FIX: Filter by either user_id OR staff_member_id
+            query += ` AND (sl.user_id = $${paramCount} OR sl.staff_member_id = $${paramCount})`;
             params.push(userId);
             paramCount++;
         }
-
+        
+        // ... (rest of the filtering logic remains the same)
         if (status === 'paid') {
             query += ` AND sl.is_paid = true`;
         } else if (status === 'unpaid') {
@@ -657,12 +690,13 @@ router.get('/loans', async (req, res) => {
 router.get('/loans/details/:userId', authenticate, async (req, res) => {
     const { userId } = req.params;
     try {
-        const query = `
-            SELECT id, amount, loan_date, reason
-            FROM staff_loans
-            WHERE user_id = $1 AND is_paid = FALSE
-            ORDER BY loan_date ASC
-        `;
+const query = `
+    SELECT id, amount, loan_date, reason
+    FROM staff_loans
+    -- FIX: Check both columns
+    WHERE (user_id = $1 OR staff_member_id = $1) AND is_paid = FALSE
+    ORDER BY loan_date ASC
+`;
         const result = await db.query(query, [userId]);
         res.status(200).json(result.rows);
     } catch (error) {
@@ -675,11 +709,12 @@ router.get('/loans/details/:userId', authenticate, async (req, res) => {
 router.get('/loans/outstanding/:userId', authenticate, async (req, res) => {
     const { userId } = req.params;
     try {
-        const query = `
-            SELECT COALESCE(SUM(amount), 0) AS outstanding_loan_amount
-            FROM staff_loans
-            WHERE user_id = $1 AND is_paid = FALSE
-        `;
+const query = `
+    SELECT COALESCE(SUM(amount), 0) AS outstanding_loan_amount
+    FROM staff_loans
+    -- FIX: Check both columns
+    WHERE (user_id = $1 OR staff_member_id = $1) AND is_paid = FALSE
+`;
         const result = await db.query(query, [userId]);
         res.status(200).json(result.rows[0]);
     } catch (error) {
