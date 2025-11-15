@@ -803,12 +803,22 @@ router.get('/all-staff', async (req, res) => {
     }
 });
 
-// POST /api/salaries/staff/:type/:id/salary - MINIMAL CHANGES VERSION
+// POST /api/salaries/staff/:type/:id/salary - FIXED VERSION
 router.post('/staff/:type/:id/salary', async (req, res) => {
     const { type, id } = req.params;
-    const salaryData = req.body;
+    const {
+        base_salary,
+        allowances,
+        deductions,
+        salary_type,
+        bank_name,
+        bank_account_name,
+        account_number,
+        tax_rate,
+        pension_rate
+    } = req.body;
 
-    console.log('Salary update request:', { type, id, salaryData });
+    console.log('Salary update request:', { type, id, formData: req.body });
 
     try {
         const staffId = parseInt(id);
@@ -818,83 +828,89 @@ router.post('/staff/:type/:id/salary', async (req, res) => {
             return res.status(400).json({ error: 'Invalid staff type' });
         }
 
+        if (isNaN(staffId)) {
+            return res.status(400).json({ error: 'Invalid staff ID' });
+        }
+
         // Check if staff exists
         const staffCheck = type === 'user' 
-            ? await db.query('SELECT id FROM users WHERE id = $1', [staffId])
-            : await db.query('SELECT id FROM staff_members WHERE id = $1', [staffId]);
+            ? await db.query('SELECT id, fullname FROM users WHERE id = $1', [staffId])
+            : await db.query('SELECT id, fullname FROM staff_members WHERE id = $1', [staffId]);
             
         if (staffCheck.rows.length === 0) {
             return res.status(404).json({ error: 'Staff not found' });
         }
 
+        console.log('Staff found:', staffCheck.rows[0]);
+
         // Calculate values
-        const netSalary = (parseFloat(salaryData.base_salary) || 0) + 
-                         (parseFloat(salaryData.allowances) || 0) - 
-                         (parseFloat(salaryData.deductions) || 0);
+        const netSalary = (parseFloat(base_salary) || 0) + 
+                         (parseFloat(allowances) || 0) - 
+                         (parseFloat(deductions) || 0);
 
-        // Build update query
-        const updateFields = [
-            'base_salary = $1',
-            'allowances = $2', 
-            'deductions = $3',
-            'net_salary = $4',
-            'salary_type = $5',
-            'bank_name = $6',
-            'bank_account_name = $7',
-            'account_number = $8',
-            'tax_rate = $9',
-            'pension_rate = $10',
-            'updated_at = CURRENT_TIMESTAMP'
-        ];
-
+        // Prepare values array
         const values = [
-            parseFloat(salaryData.base_salary) || 0,
-            parseFloat(salaryData.allowances) || 0,
-            parseFloat(salaryData.deductions) || 0,
+            parseFloat(base_salary) || 0,
+            parseFloat(allowances) || 0,
+            parseFloat(deductions) || 0,
             netSalary,
-            salaryData.salary_type || 'monthly',
-            salaryData.bank_name || '',
-            salaryData.bank_account_name || '',
-            salaryData.account_number || '',
-            parseFloat(salaryData.tax_rate) || 0,
-            parseFloat(salaryData.pension_rate) || 0
+            salary_type || 'monthly',
+            bank_name || '',
+            bank_account_name || '',
+            account_number || '',
+            parseFloat(tax_rate) || 0,
+            parseFloat(pension_rate) || 0
         ];
 
         // Try to update first
         const whereClause = type === 'user' ? 'user_id = $11' : 'staff_member_id = $11';
-        values.push(staffId);
-
-        const updateQuery = `
-            UPDATE staff_salaries 
-            SET ${updateFields.join(', ')}
-            WHERE ${whereClause}
-            RETURNING *
-        `;
-
-        const updateResult = await db.query(updateQuery, values);
-
-        if (updateResult.rows.length > 0) {
-            // Update successful
-            res.status(200).json(updateResult.rows[0]);
-        } else {
-            // No existing record, insert new one
-            const insertFields = type === 'user' 
-                ? ['user_id', ...updateFields.map(field => field.split(' = ')[0])]
-                : ['staff_member_id', ...updateFields.map(field => field.split(' = ')[0])];
-
-            const insertValues = type === 'user' 
-                ? [staffId, ...values.slice(0, -1)]
-                : [staffId, ...values.slice(0, -1)];
-
-            const placeholders = insertValues.map((_, i) => `$${i + 1}`).join(', ');
-
-            const insertQuery = `
-                INSERT INTO staff_salaries (${insertFields.join(', ')})
-                VALUES (${placeholders})
+        const updateQuery = type === 'user' 
+            ? `
+                UPDATE staff_salaries 
+                SET base_salary = $1, allowances = $2, deductions = $3, net_salary = $4,
+                    salary_type = $5, bank_name = $6, bank_account_name = $7, account_number = $8,
+                    tax_rate = $9, pension_rate = $10, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = $11
+                RETURNING *
+            `
+            : `
+                UPDATE staff_salaries 
+                SET base_salary = $1, allowances = $2, deductions = $3, net_salary = $4,
+                    salary_type = $5, bank_name = $6, bank_account_name = $7, account_number = $8,
+                    tax_rate = $9, pension_rate = $10, updated_at = CURRENT_TIMESTAMP
+                WHERE staff_member_id = $11
                 RETURNING *
             `;
 
+        const updateValues = [...values, staffId];
+        const updateResult = await db.query(updateQuery, updateValues);
+
+        if (updateResult.rows.length > 0) {
+            // Update successful
+            console.log('Salary updated successfully:', updateResult.rows[0]);
+            res.status(200).json(updateResult.rows[0]);
+        } else {
+            // No existing record, insert new one
+            const insertQuery = type === 'user' 
+                ? `
+                    INSERT INTO staff_salaries (
+                        user_id, base_salary, allowances, deductions, net_salary,
+                        salary_type, bank_name, bank_account_name, account_number, tax_rate, pension_rate
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    RETURNING *
+                `
+                : `
+                    INSERT INTO staff_salaries (
+                        staff_member_id, base_salary, allowances, deductions, net_salary,
+                        salary_type, bank_name, bank_account_name, account_number, tax_rate, pension_rate
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    RETURNING *
+                `;
+
+            const insertValues = [staffId, ...values];
             const insertResult = await db.query(insertQuery, insertValues);
+            
+            console.log('Salary inserted successfully:', insertResult.rows[0]);
             res.status(200).json(insertResult.rows[0]);
         }
 
@@ -902,7 +918,8 @@ router.post('/staff/:type/:id/salary', async (req, res) => {
         console.error('Salary update error:', error);
         res.status(500).json({ 
             error: 'Failed to update salary',
-            details: error.message 
+            details: error.message,
+            hint: 'Check that all required fields are provided and values are valid numbers.'
         });
     }
 });
