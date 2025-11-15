@@ -101,27 +101,31 @@ router.get('/payments', async (req, res) => {
         } = req.query;
 
 let query = `
-        SELECT 
-            sp.*,
-            -- FIX: Use COALESCE to prioritize the staff details (sm) over generic user details (u)
-            COALESCE(sm.fullname, u.fullname) as staff_name,
-            COALESCE(sm.role, u.role) as staff_role,
-            -- Email usually resides in the generic users table, but checking both is safe
-            COALESCE(u.email, sm.email) as staff_email,
-            paid_by_user.fullname as paid_by_name
-        FROM salary_payments sp
-        
-        -- 1. LEFT JOIN for staff members (will succeed if staff_member_id is NOT NULL)
-        LEFT JOIN staff_members sm ON sp.staff_member_id = sm.id
-        
-        -- 2. LEFT JOIN for generic users (will succeed if user_id is NOT NULL)
-        LEFT JOIN users u ON sp.user_id = u.id
-        
-        -- 3. Standard JOIN for the admin/user who paid
-        LEFT JOIN users paid_by_user ON sp.paid_by = paid_by_user.id
-        
-        WHERE 1=1
-    `;
+            SELECT 
+                sp.*,
+                -- 1. Fullname: Prioritize staff_members name (sm) over generic user name (u)
+                COALESCE(sm.fullname, u.fullname) as staff_name,
+                
+                -- 2. Role: FIX - Use sm.position (if staff) or u.role (if user)
+                COALESCE(sm.position, u.role) as staff_role,
+                
+                -- 3. Email: Safe fallback, assuming it's usually in the users table (u)
+                COALESCE(u.email, sm.email) as staff_email,
+                
+                paid_by_user.fullname as paid_by_name
+            FROM salary_payments sp
+            
+            -- 1. LEFT JOIN for staff members (sm) - links using staff_member_id
+            LEFT JOIN staff_members sm ON sp.staff_member_id = sm.id
+            
+            -- 2. LEFT JOIN for generic users (u) - links using user_id
+            LEFT JOIN users u ON sp.user_id = u.id
+            
+            -- 3. Standard JOIN for the admin/user who paid
+            LEFT JOIN users paid_by_user ON sp.paid_by = paid_by_user.id
+            
+            WHERE 1=1
+        `;
         const params = [];
         let paramCount = 1;
 
