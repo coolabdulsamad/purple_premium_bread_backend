@@ -686,6 +686,7 @@ router.get('/all-staff', async (req, res) => {
                 COALESCE(ss.net_salary, 0) as net_salary,
                 ss.salary_type,
                 ss.bank_name,
+                ss.bank_account_name, -- Add this
                 ss.account_number,
                 ss.tax_rate,
                 ss.pension_rate,
@@ -802,6 +803,7 @@ router.get('/all-staff', async (req, res) => {
     }
 });
 
+// POST /api/salaries/staff/:type/:id/salary - Update staff salary structure
 router.post('/staff/:type/:id/salary', async (req, res) => {
     const { type, id } = req.params;
     const {
@@ -817,7 +819,21 @@ router.post('/staff/:type/:id/salary', async (req, res) => {
     } = req.body;
 
     try {
-        // ... existing validation code ...
+        // Validate staff exists based on type
+        let checkQuery = '';
+        if (type === 'user') {
+            checkQuery = 'SELECT id FROM users WHERE id = $1';
+        } else {
+            checkQuery = 'SELECT id FROM staff_members WHERE id = $1';
+        }
+
+        const checkResult = await db.query(checkQuery, [id]);
+        if (checkResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Staff member not found.' });
+        }
+
+        // Calculate net salary
+        const netSalary = parseFloat(base_salary) + parseFloat(allowances || 0) - parseFloat(deductions || 0);
 
         const query = `
             INSERT INTO staff_salaries (
@@ -833,7 +849,7 @@ router.post('/staff/:type/:id/salary', async (req, res) => {
                 net_salary = EXCLUDED.net_salary,
                 salary_type = EXCLUDED.salary_type,
                 bank_name = EXCLUDED.bank_name,
-                bank_account_name = EXCLUDED.bank_account_name, // Add this
+                bank_account_name = EXCLUDED.bank_account_name,
                 account_number = EXCLUDED.account_number,
                 tax_rate = EXCLUDED.tax_rate,
                 pension_rate = EXCLUDED.pension_rate,
@@ -849,7 +865,7 @@ router.post('/staff/:type/:id/salary', async (req, res) => {
             netSalary,
             salary_type,
             bank_name,
-            bank_account_name, // Add this
+            bank_account_name || '', // Add this with default value
             account_number,
             parseFloat(tax_rate || 0),
             parseFloat(pension_rate || 0)
