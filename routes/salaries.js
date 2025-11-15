@@ -812,19 +812,23 @@ router.post('/staff/:type/:id/salary', async (req, res) => {
         deductions,
         salary_type,
         bank_name,
-        bank_account_name, // Add this
+        bank_account_name,
         account_number,
         tax_rate,
         pension_rate
     } = req.body;
+
+    console.log('Updating salary for:', { type, id, bank_account_name });
 
     try {
         // Validate staff exists based on type
         let checkQuery = '';
         if (type === 'user') {
             checkQuery = 'SELECT id FROM users WHERE id = $1';
-        } else {
+        } else if (type === 'staff_member') {
             checkQuery = 'SELECT id FROM staff_members WHERE id = $1';
+        } else {
+            return res.status(400).json({ error: 'Invalid staff type. Must be "user" or "staff_member".' });
         }
 
         const checkResult = await db.query(checkQuery, [id]);
@@ -833,15 +837,19 @@ router.post('/staff/:type/:id/salary', async (req, res) => {
         }
 
         // Calculate net salary
-        const netSalary = parseFloat(base_salary) + parseFloat(allowances || 0) - parseFloat(deductions || 0);
+        const netSalary = parseFloat(base_salary || 0) + parseFloat(allowances || 0) - parseFloat(deductions || 0);
+
+        // Determine the conflict target based on type
+        const conflictTarget = type === 'user' ? 'user_id' : 'staff_member_id';
+        const idField = type === 'user' ? 'user_id' : 'staff_member_id';
 
         const query = `
             INSERT INTO staff_salaries (
-                ${type === 'user' ? 'user_id' : 'staff_member_id'}, 
+                ${idField}, 
                 base_salary, allowances, deductions, net_salary,
                 salary_type, bank_name, bank_account_name, account_number, tax_rate, pension_rate
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-            ON CONFLICT (${type === 'user' ? 'user_id' : 'staff_member_id'}) 
+            ON CONFLICT (${conflictTarget}) 
             DO UPDATE SET
                 base_salary = EXCLUDED.base_salary,
                 allowances = EXCLUDED.allowances,
@@ -859,22 +867,27 @@ router.post('/staff/:type/:id/salary', async (req, res) => {
 
         const result = await db.query(query, [
             id,
-            parseFloat(base_salary),
+            parseFloat(base_salary || 0),
             parseFloat(allowances || 0),
             parseFloat(deductions || 0),
             netSalary,
-            salary_type,
-            bank_name,
-            bank_account_name || '', // Add this with default value
-            account_number,
+            salary_type || 'monthly',
+            bank_name || '',
+            bank_account_name || '',
+            account_number || '',
             parseFloat(tax_rate || 0),
             parseFloat(pension_rate || 0)
         ]);
 
+        console.log('Salary updated successfully:', result.rows[0]);
         res.status(200).json(result.rows[0]);
     } catch (error) {
         console.error('Error updating staff salary:', error);
-        res.status(500).json({ error: 'Failed to update staff salary.', details: error.message });
+        res.status(500).json({ 
+            error: 'Failed to update staff salary.', 
+            details: error.message,
+            stack: error.stack 
+        });
     }
 });
 
