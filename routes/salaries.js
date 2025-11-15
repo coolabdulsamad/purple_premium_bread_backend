@@ -862,18 +862,31 @@ router.post('/staff/:type/:id/salary', async (req, res) => {
             parseFloat(pension_rate) || 0
         ];
 
-        // Try to update first
-        const whereClause = type === 'user' ? 'user_id = $11' : 'staff_member_id = $11';
-        const updateQuery = type === 'user' 
-            ? `
+        // Build the query based on staff type
+        let updateQuery, insertQuery, whereClause, idField;
+
+        if (type === 'user') {
+            idField = 'user_id';
+            whereClause = 'user_id = $11';
+            updateQuery = `
                 UPDATE staff_salaries 
                 SET base_salary = $1, allowances = $2, deductions = $3, net_salary = $4,
                     salary_type = $5, bank_name = $6, bank_account_name = $7, account_number = $8,
                     tax_rate = $9, pension_rate = $10, updated_at = CURRENT_TIMESTAMP
                 WHERE user_id = $11
                 RETURNING *
-            `
-            : `
+            `;
+            insertQuery = `
+                INSERT INTO staff_salaries (
+                    user_id, base_salary, allowances, deductions, net_salary,
+                    salary_type, bank_name, bank_account_name, account_number, tax_rate, pension_rate
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                RETURNING *
+            `;
+        } else {
+            idField = 'staff_member_id';
+            whereClause = 'staff_member_id = $11';
+            updateQuery = `
                 UPDATE staff_salaries 
                 SET base_salary = $1, allowances = $2, deductions = $3, net_salary = $4,
                     salary_type = $5, bank_name = $6, bank_account_name = $7, account_number = $8,
@@ -881,7 +894,16 @@ router.post('/staff/:type/:id/salary', async (req, res) => {
                 WHERE staff_member_id = $11
                 RETURNING *
             `;
+            insertQuery = `
+                INSERT INTO staff_salaries (
+                    staff_member_id, base_salary, allowances, deductions, net_salary,
+                    salary_type, bank_name, bank_account_name, account_number, tax_rate, pension_rate
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                RETURNING *
+            `;
+        }
 
+        // Try to update first
         const updateValues = [...values, staffId];
         const updateResult = await db.query(updateQuery, updateValues);
 
@@ -891,22 +913,6 @@ router.post('/staff/:type/:id/salary', async (req, res) => {
             res.status(200).json(updateResult.rows[0]);
         } else {
             // No existing record, insert new one
-            const insertQuery = type === 'user' 
-                ? `
-                    INSERT INTO staff_salaries (
-                        user_id, base_salary, allowances, deductions, net_salary,
-                        salary_type, bank_name, bank_account_name, account_number, tax_rate, pension_rate
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                    RETURNING *
-                `
-                : `
-                    INSERT INTO staff_salaries (
-                        staff_member_id, base_salary, allowances, deductions, net_salary,
-                        salary_type, bank_name, bank_account_name, account_number, tax_rate, pension_rate
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                    RETURNING *
-                `;
-
             const insertValues = [staffId, ...values];
             const insertResult = await db.query(insertQuery, insertValues);
             
