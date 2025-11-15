@@ -103,17 +103,22 @@ router.get('/payments', async (req, res) => {
 let query = `
         SELECT 
             sp.*,
-            u.fullname as staff_name,
-            u.role as staff_role,
-            u.email as staff_email,
+            -- FIX: Select details from the dedicated Staff User (u_staff) or the generic User (u_generic)
+            COALESCE(u_staff.fullname, u_generic.fullname) as staff_name,
+            COALESCE(u_staff.role, u_generic.role) as staff_role,
+            COALESCE(u_staff.email, u_generic.email) as staff_email,
             paid_by_user.fullname as paid_by_name
         FROM salary_payments sp
         
-        -- FIX: Prioritize joining using staff_member_id, then fall back to user_id.
-        -- If staff_member_id is NOT NULL, this will be used for the JOIN.
-        JOIN users u ON u.id = COALESCE(sp.staff_member_id, sp.user_id) 
+        -- 1. LEFT JOIN to the 'users' table using staff_member_id (for staff-specific details)
+        LEFT JOIN users u_staff ON sp.staff_member_id = u_staff.id
         
+        -- 2. LEFT JOIN to the 'users' table using user_id (for generic user details)
+        LEFT JOIN users u_generic ON sp.user_id = u_generic.id
+        
+        -- 3. Standard JOIN for the admin/user who paid
         LEFT JOIN users paid_by_user ON sp.paid_by = paid_by_user.id
+        
         WHERE 1=1
     `;
         const params = [];
