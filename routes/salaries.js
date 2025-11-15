@@ -16,7 +16,7 @@ router.get('/staff', async (req, res) => {
             isActive = 'true'
         } = req.query;
 
-        let query = `
+let query = `
             SELECT 
                 u.id, u.username, u.fullname, u.email, u.phone_number, u.role, u.is_active,
                 COALESCE(ss.base_salary, 0) as base_salary,
@@ -25,6 +25,7 @@ router.get('/staff', async (req, res) => {
                 COALESCE(ss.net_salary, 0) as net_salary,
                 ss.salary_type,
                 ss.bank_name,
+                ss.bank_account_name,  /* <--- ADD THIS LINE */
                 ss.account_number,
                 ss.tax_rate,
                 ss.pension_rate,
