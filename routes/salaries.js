@@ -109,8 +109,9 @@ let query = `
             paid_by_user.fullname as paid_by_name
         FROM salary_payments sp
         
-        -- FIX: Use COALESCE to join to the 'users' table using whichever ID column is NOT NULL (user_id or staff_member_id)
-        JOIN users u ON u.id = COALESCE(sp.user_id, sp.staff_member_id)
+        -- FIX: Prioritize joining using staff_member_id, then fall back to user_id.
+        -- If staff_member_id is NOT NULL, this will be used for the JOIN.
+        JOIN users u ON u.id = COALESCE(sp.staff_member_id, sp.user_id) 
         
         LEFT JOIN users paid_by_user ON sp.paid_by = paid_by_user.id
         WHERE 1=1
