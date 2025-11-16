@@ -687,7 +687,7 @@ router.post('/loans', authenticate, async (req, res) => {
     }
 });
 
-// GET /api/salaries/loans - Get all loans with filters (UPDATED VERSION)
+// GET /api/salaries/loans - Get all loans with filters (UPDATED WITH PROPER JOINS)
 router.get('/loans', async (req, res) => {
     try {
         const {
@@ -702,18 +702,35 @@ router.get('/loans', async (req, res) => {
         let query = `
             SELECT 
                 sl.*,
-                COALESCE(sm.fullname, u.fullname) as borrower_name,
-                COALESCE(sm.position, u.role) as borrower_role,
-                COALESCE(u.email, sm.email) as borrower_email,
-                sp.payment_date as deducted_date,
+                -- Get staff name from appropriate table
+                CASE 
+                    WHEN sl.user_id IS NOT NULL THEN u.fullname
+                    WHEN sl.staff_member_id IS NOT NULL THEN sm.fullname
+                    ELSE 'Unknown Staff'
+                END as borrower_name,
+                -- Get staff role/position from appropriate table
+                CASE 
+                    WHEN sl.user_id IS NOT NULL THEN u.role
+                    WHEN sl.staff_member_id IS NOT NULL THEN sm.position
+                    ELSE 'Unknown Role'
+                END as borrower_role,
+                -- Get email from appropriate table
+                CASE 
+                    WHEN sl.user_id IS NOT NULL THEN u.email
+                    WHEN sl.staff_member_id IS NOT NULL THEN sm.email
+                    ELSE NULL
+                END as borrower_email,
+                -- Staff type for identification
                 CASE 
                     WHEN sl.user_id IS NOT NULL THEN 'user'
                     WHEN sl.staff_member_id IS NOT NULL THEN 'staff_member'
                     ELSE 'unknown'
-                END as staff_type
+                END as staff_type,
+                sp.payment_date as deducted_date
             FROM staff_loans sl
-            LEFT JOIN staff_members sm ON sl.staff_member_id = sm.id
+            -- LEFT JOIN both tables to handle both user and staff member cases
             LEFT JOIN users u ON sl.user_id = u.id
+            LEFT JOIN staff_members sm ON sl.staff_member_id = sm.id
             LEFT JOIN salary_payments sp ON sl.deducted_on_payment_id = sp.id
             WHERE 1=1
         `;
@@ -781,15 +798,20 @@ router.get('/loans/details/:userId', authenticate, async (req, res) => {
     const { userId } = req.params;
     try {
         const query = `
-            SELECT id, amount, loan_date, reason,
-                   CASE 
-                       WHEN user_id IS NOT NULL THEN 'user'
-                       WHEN staff_member_id IS NOT NULL THEN 'staff_member'
-                       ELSE 'unknown'
-                   END as staff_type
-            FROM staff_loans
-            WHERE (user_id = $1 OR staff_member_id = $1) AND is_paid = FALSE
-            ORDER BY loan_date ASC
+            SELECT 
+                sl.id, 
+                sl.amount, 
+                sl.loan_date, 
+                sl.reason,
+                CASE 
+                    WHEN sl.user_id IS NOT NULL THEN 'user'
+                    WHEN sl.staff_member_id IS NOT NULL THEN 'staff_member'
+                    ELSE 'unknown'
+                END as staff_type
+            FROM staff_loans sl
+            WHERE (sl.user_id = $1 OR sl.staff_member_id = $1) 
+              AND sl.is_paid = FALSE
+            ORDER BY sl.loan_date ASC
         `;
         const result = await db.query(query, [userId]);
         res.status(200).json(result.rows);
@@ -804,9 +826,10 @@ router.get('/loans/outstanding/:userId', authenticate, async (req, res) => {
     const { userId } = req.params;
     try {
         const query = `
-            SELECT COALESCE(SUM(amount), 0) AS outstanding_loan_amount
-            FROM staff_loans
-            WHERE (user_id = $1 OR staff_member_id = $1) AND is_paid = FALSE
+            SELECT COALESCE(SUM(sl.amount), 0) AS outstanding_loan_amount
+            FROM staff_loans sl
+            WHERE (sl.user_id = $1 OR sl.staff_member_id = $1) 
+              AND sl.is_paid = FALSE
         `;
         const result = await db.query(query, [userId]);
         res.status(200).json(result.rows[0]);
@@ -816,42 +839,6 @@ router.get('/loans/outstanding/:userId', authenticate, async (req, res) => {
     }
 });
 
-// GET /api/salaries/loans/details/:userId - Get details of all outstanding loans for deduction
-// router.get('/loans/details/:userId', authenticate, async (req, res) => {
-//     const { userId } = req.params;
-//     try {
-// const query = `
-//     SELECT id, amount, loan_date, reason
-//     FROM staff_loans
-//     -- FIX: Check both columns
-//     WHERE (user_id = $1 OR staff_member_id = $1) AND is_paid = FALSE
-//     ORDER BY loan_date ASC
-// `;
-//         const result = await db.query(query, [userId]);
-//         res.status(200).json(result.rows);
-//     } catch (error) {
-//         console.error('Error fetching outstanding loan details:', error);
-//         res.status(500).json({ error: 'Failed to fetch outstanding loan details.', details: error.message });
-//     }
-// });
-
-// GET /api/salaries/loans/outstanding/:userId - Get total outstanding loan for a staff member
-// router.get('/loans/outstanding/:userId', authenticate, async (req, res) => {
-//     const { userId } = req.params;
-//     try {
-// const query = `
-//     SELECT COALESCE(SUM(amount), 0) AS outstanding_loan_amount
-//     FROM staff_loans
-//     -- FIX: Check both columns
-//     WHERE (user_id = $1 OR staff_member_id = $1) AND is_paid = FALSE
-// `;
-//         const result = await db.query(query, [userId]);
-//         res.status(200).json(result.rows[0]);
-//     } catch (error) {
-//         console.error('Error fetching outstanding loan:', error);
-//         res.status(500).json({ error: 'Failed to fetch outstanding loan.', details: error.message });
-//     }
-// });
 
 // GET /api/salaries/summary - Get salary summary by period
 router.get('/summary', async (req, res) => {
