@@ -498,25 +498,31 @@ router.post('/payments', authenticate, async (req, res) => {
 
         const newPaymentId = paymentResult.rows[0].id;
 
-        // Update loan status if loans were deducted
-        // (This part remains correct, assuming loan table uses user_id or staff_member_id consistently)
-// Update loan status if loans were deducted
-        if (loan_ids && loan_ids.length > 0 && parseFloat(loan_deduction || 0) > 0) {
-            // Determine which ID column holds the staff/user ID for the loan update check
-            // We use COALESCE to get the correct ID whether it's for user or staff_member
-            const loan_check_id = payment_user_id || payment_staff_member_id;
+// In the payment processing route, update the loan update section:
+if (loan_ids && loan_ids.length > 0 && parseFloat(loan_deduction || 0) > 0) {
+    // Determine which ID column to use based on staff type
+    let idCondition = '';
+    let idValue = null;
+    
+    if (payment_user_id) {
+        idCondition = 'user_id = $3';
+        idValue = payment_user_id;
+    } else if (payment_staff_member_id) {
+        idCondition = 'staff_member_id = $3';
+        idValue = payment_staff_member_id;
+    } else {
+        throw new Error('Cannot determine staff type for loan update');
+    }
 
-            const loanUpdateQuery = `
-                UPDATE staff_loans
-                SET is_paid = TRUE, deducted_on_payment_id = $1, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ANY($2) 
-                  -- FIX: Use COALESCE to check against whichever column holds the ID
-                  AND COALESCE(user_id, staff_member_id) = $3 
-                  AND is_paid = FALSE
-            `;
-            // NOTE: $3 is the actual ID we received, which is loan_check_id
-            await client.query(loanUpdateQuery, [newPaymentId, loan_ids, loan_check_id]);
-        }
+    const loanUpdateQuery = `
+        UPDATE staff_loans
+        SET is_paid = TRUE, deducted_on_payment_id = $1, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ANY($2) 
+          AND ${idCondition}
+          AND is_paid = FALSE
+    `;
+    await client.query(loanUpdateQuery, [newPaymentId, loan_ids, idValue]);
+}
 
         await client.query('COMMIT');
 
@@ -544,9 +550,8 @@ router.post('/payments', authenticate, async (req, res) => {
     }
 });
 
-// POST /api/salaries/loans - Record a new staff loan/advance
+// POST /api/salaries/loans - Record a new staff loan/advance (FIXED VERSION)
 router.post('/loans', authenticate, async (req, res) => {
-    // We use user_id from the body as the generic borrower_id
     const { user_id: borrower_id, loan_date, amount, reason } = req.body; 
 
     if (!borrower_id || !loan_date || !amount) {
@@ -557,50 +562,97 @@ router.post('/loans', authenticate, async (req, res) => {
         return res.status(400).json({ error: 'Loan amount must be greater than zero.' });
     }
 
+    const client = await db.getClient();
+    
     try {
-        const client = await db.getClient();
-        
-        let staff_member_id_value = null;
-        // borrower_id must always go into user_id because the column is NOT NULL
-        const user_id_value = borrower_id; 
+        await client.query('BEGIN');
 
-        // 1. Check if the ID exists in the staff_members table
-        const staffCheckQuery = `SELECT id FROM staff_members WHERE id = $1`;
+        // Check if the ID exists in users table
+        const userCheckQuery = `SELECT id, role FROM users WHERE id = $1 AND is_active = true`;
+        const userCheckResult = await client.query(userCheckQuery, [borrower_id]);
+
+        // Check if the ID exists in staff_members table
+        const staffCheckQuery = `SELECT id, position FROM staff_members WHERE id = $1 AND is_active = true`;
         const staffCheckResult = await client.query(staffCheckQuery, [borrower_id]);
 
-        if (staffCheckResult.rows.length > 0) {
-            // 2. If it is a staff member, duplicate the ID in staff_member_id
-            // This is the necessary redundancy to identify them as staff later.
+        let user_id_value = null;
+        let staff_member_id_value = null;
+        let staff_type = null;
+
+        if (userCheckResult.rows.length > 0 && staffCheckResult.rows.length > 0) {
+            // ID exists in both tables - this should not happen normally, but if it does, prioritize user
+            console.warn(`ID ${borrower_id} exists in both users and staff_members tables. Defaulting to user.`);
+            user_id_value = borrower_id;
+            staff_type = 'user';
+        } else if (userCheckResult.rows.length > 0) {
+            // ID exists in users table only
+            user_id_value = borrower_id;
+            staff_type = 'user';
+        } else if (staffCheckResult.rows.length > 0) {
+            // ID exists in staff_members table only
             staff_member_id_value = borrower_id;
-        } 
-        
-        // 3. Insert into the correct columns
+            staff_type = 'staff_member';
+        } else {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ 
+                error: 'Staff member not found.', 
+                details: `ID ${borrower_id} not found in users or staff_members table.` 
+            });
+        }
+
+        console.log(`Loan processing - ID: ${borrower_id}, Type: ${staff_type}, UserID: ${user_id_value}, StaffMemberID: ${staff_member_id_value}`);
+
+        // Insert into the correct columns
         const query = `
             INSERT INTO staff_loans 
                 (user_id, staff_member_id, loan_date, amount, reason, created_at)
             VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
             RETURNING *
         `;
+        
         const result = await client.query(query, [
-            user_id_value,              // $1: Always the borrower_id (satisfies NOT NULL)
-            staff_member_id_value,      // $2: Null OR the borrower_id (identifies staff)
+            user_id_value,              // $1: null for staff_member, ID for user
+            staff_member_id_value,      // $2: null for user, ID for staff_member
             loan_date, 
             parseFloat(amount), 
             reason
         ]);
+
+        await client.query('COMMIT');
         
-        client.release();
-        res.status(201).json(result.rows[0]);
+        // Return the loan record with staff information
+        const loanWithStaffQuery = `
+            SELECT 
+                sl.*,
+                COALESCE(u.fullname, sm.fullname) as borrower_name,
+                COALESCE(u.role, sm.position) as borrower_role,
+                COALESCE(u.email, sm.email) as borrower_email
+            FROM staff_loans sl
+            LEFT JOIN users u ON sl.user_id = u.id
+            LEFT JOIN staff_members sm ON sl.staff_member_id = sm.id
+            WHERE sl.id = $1
+        `;
+        
+        const loanWithStaff = await client.query(loanWithStaffQuery, [result.rows[0].id]);
+        
+        res.status(201).json({
+            ...loanWithStaff.rows[0],
+            staff_type: staff_type // Include the determined staff type in response
+        });
+        
     } catch (error) {
+        await client.query('ROLLBACK');
         console.error('Error recording staff loan:', error);
         res.status(500).json({ 
             error: 'Failed to record staff loan.', 
             details: error.message 
         });
+    } finally {
+        client.release();
     }
 });
 
-// GET /api/salaries/loans - Get all loans with filters
+// GET /api/salaries/loans - Get all loans with filters (UPDATED VERSION)
 router.get('/loans', async (req, res) => {
     try {
         const {
@@ -612,31 +664,35 @@ router.get('/loans', async (req, res) => {
             limit = 50
         } = req.query;
 
-let query = `
-    SELECT 
-        sl.*,
-        COALESCE(sm.fullname, u.fullname) as borrower_name,
-        COALESCE(sm.position, u.role) as borrower_role,
-        COALESCE(u.email, sm.email) as borrower_email,
-        sp.payment_date as deducted_date
-    FROM staff_loans sl
-    LEFT JOIN staff_members sm ON sl.staff_member_id = sm.id  // Staff join
-    LEFT JOIN users u ON sl.user_id = u.id                     // User join
-    LEFT JOIN salary_payments sp ON sl.deducted_on_payment_id = sp.id
-    WHERE 1=1
-`;
+        let query = `
+            SELECT 
+                sl.*,
+                COALESCE(sm.fullname, u.fullname) as borrower_name,
+                COALESCE(sm.position, u.role) as borrower_role,
+                COALESCE(u.email, sm.email) as borrower_email,
+                sp.payment_date as deducted_date,
+                CASE 
+                    WHEN sl.user_id IS NOT NULL THEN 'user'
+                    WHEN sl.staff_member_id IS NOT NULL THEN 'staff_member'
+                    ELSE 'unknown'
+                END as staff_type
+            FROM staff_loans sl
+            LEFT JOIN staff_members sm ON sl.staff_member_id = sm.id
+            LEFT JOIN users u ON sl.user_id = u.id
+            LEFT JOIN salary_payments sp ON sl.deducted_on_payment_id = sp.id
+            WHERE 1=1
+        `;
 
         const params = [];
         let paramCount = 1;
 
         if (userId) {
-            // FIX: Filter by either user_id OR staff_member_id
+            // Filter by either user_id OR staff_member_id
             query += ` AND (sl.user_id = $${paramCount} OR sl.staff_member_id = $${paramCount})`;
             params.push(userId);
             paramCount++;
         }
         
-        // ... (rest of the filtering logic remains the same)
         if (status === 'paid') {
             query += ` AND sl.is_paid = true`;
         } else if (status === 'unpaid') {
@@ -685,17 +741,21 @@ let query = `
     }
 });
 
-// GET /api/salaries/loans/details/:userId - Get details of all outstanding loans for deduction
+// GET /api/salaries/loans/details/:userId - Get details of all outstanding loans for deduction (UPDATED)
 router.get('/loans/details/:userId', authenticate, async (req, res) => {
     const { userId } = req.params;
     try {
-const query = `
-    SELECT id, amount, loan_date, reason
-    FROM staff_loans
-    -- FIX: Check both columns
-    WHERE (user_id = $1 OR staff_member_id = $1) AND is_paid = FALSE
-    ORDER BY loan_date ASC
-`;
+        const query = `
+            SELECT id, amount, loan_date, reason,
+                   CASE 
+                       WHEN user_id IS NOT NULL THEN 'user'
+                       WHEN staff_member_id IS NOT NULL THEN 'staff_member'
+                       ELSE 'unknown'
+                   END as staff_type
+            FROM staff_loans
+            WHERE (user_id = $1 OR staff_member_id = $1) AND is_paid = FALSE
+            ORDER BY loan_date ASC
+        `;
         const result = await db.query(query, [userId]);
         res.status(200).json(result.rows);
     } catch (error) {
@@ -704,16 +764,15 @@ const query = `
     }
 });
 
-// GET /api/salaries/loans/outstanding/:userId - Get total outstanding loan for a staff member
+// GET /api/salaries/loans/outstanding/:userId - Get total outstanding loan for a staff member (UPDATED)
 router.get('/loans/outstanding/:userId', authenticate, async (req, res) => {
     const { userId } = req.params;
     try {
-const query = `
-    SELECT COALESCE(SUM(amount), 0) AS outstanding_loan_amount
-    FROM staff_loans
-    -- FIX: Check both columns
-    WHERE (user_id = $1 OR staff_member_id = $1) AND is_paid = FALSE
-`;
+        const query = `
+            SELECT COALESCE(SUM(amount), 0) AS outstanding_loan_amount
+            FROM staff_loans
+            WHERE (user_id = $1 OR staff_member_id = $1) AND is_paid = FALSE
+        `;
         const result = await db.query(query, [userId]);
         res.status(200).json(result.rows[0]);
     } catch (error) {
@@ -721,6 +780,43 @@ const query = `
         res.status(500).json({ error: 'Failed to fetch outstanding loan.', details: error.message });
     }
 });
+
+// GET /api/salaries/loans/details/:userId - Get details of all outstanding loans for deduction
+// router.get('/loans/details/:userId', authenticate, async (req, res) => {
+//     const { userId } = req.params;
+//     try {
+// const query = `
+//     SELECT id, amount, loan_date, reason
+//     FROM staff_loans
+//     -- FIX: Check both columns
+//     WHERE (user_id = $1 OR staff_member_id = $1) AND is_paid = FALSE
+//     ORDER BY loan_date ASC
+// `;
+//         const result = await db.query(query, [userId]);
+//         res.status(200).json(result.rows);
+//     } catch (error) {
+//         console.error('Error fetching outstanding loan details:', error);
+//         res.status(500).json({ error: 'Failed to fetch outstanding loan details.', details: error.message });
+//     }
+// });
+
+// GET /api/salaries/loans/outstanding/:userId - Get total outstanding loan for a staff member
+// router.get('/loans/outstanding/:userId', authenticate, async (req, res) => {
+//     const { userId } = req.params;
+//     try {
+// const query = `
+//     SELECT COALESCE(SUM(amount), 0) AS outstanding_loan_amount
+//     FROM staff_loans
+//     -- FIX: Check both columns
+//     WHERE (user_id = $1 OR staff_member_id = $1) AND is_paid = FALSE
+// `;
+//         const result = await db.query(query, [userId]);
+//         res.status(200).json(result.rows[0]);
+//     } catch (error) {
+//         console.error('Error fetching outstanding loan:', error);
+//         res.status(500).json({ error: 'Failed to fetch outstanding loan.', details: error.message });
+//     }
+// });
 
 // GET /api/salaries/summary - Get salary summary by period
 router.get('/summary', async (req, res) => {
