@@ -550,9 +550,9 @@ if (loan_ids && loan_ids.length > 0 && parseFloat(loan_deduction || 0) > 0) {
     }
 });
 
-// POST /api/salaries/loans - Record a new staff loan/advance (FIXED VERSION)
+// POST /api/salaries/loans - Record a new staff loan/advance (FINAL FIXED VERSION)
 router.post('/loans', authenticate, async (req, res) => {
-    const { user_id: borrower_id, loan_date, amount, reason } = req.body; 
+    const { user_id: borrower_id, staff_type, loan_date, amount, reason } = req.body; 
 
     if (!borrower_id || !loan_date || !amount) {
         return res.status(400).json({ error: 'Missing required fields: user_id (borrower_id), loan_date, and amount.' });
@@ -567,40 +567,73 @@ router.post('/loans', authenticate, async (req, res) => {
     try {
         await client.query('BEGIN');
 
-        // Check if the ID exists in users table
-        const userCheckQuery = `SELECT id, role FROM users WHERE id = $1 AND is_active = true`;
-        const userCheckResult = await client.query(userCheckQuery, [borrower_id]);
-
-        // Check if the ID exists in staff_members table
-        const staffCheckQuery = `SELECT id, position FROM staff_members WHERE id = $1 AND is_active = true`;
-        const staffCheckResult = await client.query(staffCheckQuery, [borrower_id]);
-
         let user_id_value = null;
         let staff_member_id_value = null;
-        let staff_type = null;
+        let final_staff_type = null;
 
-        if (userCheckResult.rows.length > 0 && staffCheckResult.rows.length > 0) {
-            // ID exists in both tables - this should not happen normally, but if it does, prioritize user
-            console.warn(`ID ${borrower_id} exists in both users and staff_members tables. Defaulting to user.`);
-            user_id_value = borrower_id;
-            staff_type = 'user';
-        } else if (userCheckResult.rows.length > 0) {
-            // ID exists in users table only
-            user_id_value = borrower_id;
-            staff_type = 'user';
-        } else if (staffCheckResult.rows.length > 0) {
-            // ID exists in staff_members table only
-            staff_member_id_value = borrower_id;
-            staff_type = 'staff_member';
+        // Use the staff_type from frontend if provided, otherwise auto-detect
+        if (staff_type === 'staff_member') {
+            // Verify the ID exists in staff_members table
+            const staffCheckQuery = `SELECT id FROM staff_members WHERE id = $1 AND is_active = true`;
+            const staffCheckResult = await client.query(staffCheckQuery, [borrower_id]);
+            
+            if (staffCheckResult.rows.length > 0) {
+                staff_member_id_value = borrower_id;
+                final_staff_type = 'staff_member';
+                console.log(`ID ${borrower_id} confirmed as staff_member - saving to staff_member_id`);
+            } else {
+                await client.query('ROLLBACK');
+                return res.status(404).json({ 
+                    error: 'Staff member not found.', 
+                    details: `ID ${borrower_id} not found in staff_members table.` 
+                });
+            }
+        } else if (staff_type === 'user') {
+            // Verify the ID exists in users table
+            const userCheckQuery = `SELECT id FROM users WHERE id = $1 AND is_active = true`;
+            const userCheckResult = await client.query(userCheckQuery, [borrower_id]);
+            
+            if (userCheckResult.rows.length > 0) {
+                user_id_value = borrower_id;
+                final_staff_type = 'user';
+                console.log(`ID ${borrower_id} confirmed as user - saving to user_id`);
+            } else {
+                await client.query('ROLLBACK');
+                return res.status(404).json({ 
+                    error: 'User not found.', 
+                    details: `ID ${borrower_id} not found in users table.` 
+                });
+            }
         } else {
-            await client.query('ROLLBACK');
-            return res.status(404).json({ 
-                error: 'Staff member not found.', 
-                details: `ID ${borrower_id} not found in users or staff_members table.` 
-            });
+            // Auto-detect if staff_type not provided
+            // FIRST, check staff_members table
+            const staffCheckQuery = `SELECT id FROM staff_members WHERE id = $1 AND is_active = true`;
+            const staffCheckResult = await client.query(staffCheckQuery, [borrower_id]);
+
+            if (staffCheckResult.rows.length > 0) {
+                staff_member_id_value = borrower_id;
+                final_staff_type = 'staff_member';
+                console.log(`ID ${borrower_id} auto-detected as staff_member - saving to staff_member_id`);
+            } else {
+                // Check users table
+                const userCheckQuery = `SELECT id FROM users WHERE id = $1 AND is_active = true`;
+                const userCheckResult = await client.query(userCheckQuery, [borrower_id]);
+
+                if (userCheckResult.rows.length > 0) {
+                    user_id_value = borrower_id;
+                    final_staff_type = 'user';
+                    console.log(`ID ${borrower_id} auto-detected as user - saving to user_id`);
+                } else {
+                    await client.query('ROLLBACK');
+                    return res.status(404).json({ 
+                        error: 'Staff member not found.', 
+                        details: `ID ${borrower_id} not found in users or staff_members table.` 
+                    });
+                }
+            }
         }
 
-        console.log(`Loan processing - ID: ${borrower_id}, Type: ${staff_type}, UserID: ${user_id_value}, StaffMemberID: ${staff_member_id_value}`);
+        console.log(`Loan processing - ID: ${borrower_id}, Type: ${final_staff_type}, UserID: ${user_id_value}, StaffMemberID: ${staff_member_id_value}`);
 
         // Insert into the correct columns
         const query = `
@@ -626,7 +659,12 @@ router.post('/loans', authenticate, async (req, res) => {
                 sl.*,
                 COALESCE(u.fullname, sm.fullname) as borrower_name,
                 COALESCE(u.role, sm.position) as borrower_role,
-                COALESCE(u.email, sm.email) as borrower_email
+                COALESCE(u.email, sm.email) as borrower_email,
+                CASE 
+                    WHEN sl.user_id IS NOT NULL THEN 'user'
+                    WHEN sl.staff_member_id IS NOT NULL THEN 'staff_member'
+                    ELSE 'unknown'
+                END as staff_type
             FROM staff_loans sl
             LEFT JOIN users u ON sl.user_id = u.id
             LEFT JOIN staff_members sm ON sl.staff_member_id = sm.id
@@ -635,10 +673,7 @@ router.post('/loans', authenticate, async (req, res) => {
         
         const loanWithStaff = await client.query(loanWithStaffQuery, [result.rows[0].id]);
         
-        res.status(201).json({
-            ...loanWithStaff.rows[0],
-            staff_type: staff_type // Include the determined staff type in response
-        });
+        res.status(201).json(loanWithStaff.rows[0]);
         
     } catch (error) {
         await client.query('ROLLBACK');
