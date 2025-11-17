@@ -134,4 +134,58 @@ router.post('/:id/history', authenticate, async (req, res) => {
     }
 });
 
+// UPDATE company debt
+router.put('/:id', async (req, res) => {
+    const { id } = req.params;
+    const {
+        staff_id,
+        staff_type,
+        amount,
+        reason,
+        debt_type,
+        status
+    } = req.body;
+
+    try {
+        const query = `
+            UPDATE company_debts
+            SET staff_id = $1,
+                staff_type = $2,
+                amount = $3,
+                reason = $4,
+                debt_type = $5,
+                status = $6,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $7
+            RETURNING *
+        `;
+
+        const values = [
+            staff_id,
+            staff_type,
+            amount,
+            reason,
+            debt_type,
+            status,
+            id
+        ];
+
+        const result = await db.query(query, values);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: "Debt record not found" });
+        }
+
+        res.status(200).json(result.rows[0]);
+        
+    } catch (error) {
+        console.error("Error updating company debt:", error);
+        res.status(500).json({
+            error: "Failed to update company debt",
+            details: error.message
+        });
+    }
+});
+
+
 module.exports = router;
