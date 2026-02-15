@@ -25,30 +25,30 @@ const upload = multer({
     }
 });
 
-// Helper function to upload image to ImgBB
+// Helper function to upload image to ImgBB with better error handling
 const uploadImageToImgBB = async (imageBuffer) => {
     try {
-        const formData = new FormData();
-        // Convert buffer to base64 properly
+        // Convert buffer to base64
         const base64Image = imageBuffer.toString('base64');
+        
+        // Create form data
+        const formData = new URLSearchParams();
         formData.append('image', base64Image);
         
         const response = await axios.post(
             `https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`,
-            formData,
+            formData.toString(),
             {
                 headers: {
-                    ...formData.getHeaders(),
-                    'Content-Length': formData.getLengthSync()
-                },
-                maxContentLength: Infinity,
-                maxBodyLength: Infinity
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                }
             }
         );
         
-        if (response.data.success) {
+        if (response.data && response.data.success) {
             return response.data.data.url;
         } else {
+            console.error('ImgBB response:', response.data);
             throw new Error('Failed to upload image to ImgBB');
         }
     } catch (error) {
@@ -275,15 +275,22 @@ router.get('/:id', authenticate, async (req, res) => {
     }
 });
 
-// POST /api/riders - Create new rider (fixed)
-router.post('/', authenticate, (req, res) => {
-    // Use upload.fields as middleware with proper error handling
-    upload.fields([
+// purple-premium-bread-api/routes/riders.js - FIXED POST ROUTE
+
+// POST /api/riders - Create new rider (FIXED VERSION)
+router.post('/', authenticate, async (req, res) => {
+    // Use a simpler multer configuration
+    const uploadMiddleware = multer({
+        storage: multer.memoryStorage(),
+        limits: { fileSize: 5 * 1024 * 1024 }
+    }).fields([
         { name: 'profile_image', maxCount: 1 },
         { name: 'id_image', maxCount: 1 },
         { name: 'guarantor1_id_image', maxCount: 1 },
         { name: 'guarantor2_id_image', maxCount: 1 }
-    ])(req, res, async (err) => {
+    ]);
+
+    uploadMiddleware(req, res, async (err) => {
         if (err) {
             console.error('Multer error:', err);
             return res.status(400).json({ 
@@ -297,10 +304,11 @@ router.post('/', authenticate, (req, res) => {
         try {
             console.log('=== Starting rider creation ===');
             console.log('Request body:', req.body);
-            console.log('Files received:', req.files ? Object.keys(req.files) : 'No files');
+            console.log('Files:', req.files ? Object.keys(req.files) : 'No files');
             
             await client.query('BEGIN');
             
+            // Extract all fields from req.body
             const {
                 fullname, phone_number, email, address, date_of_birth,
                 id_type, id_number,
@@ -314,11 +322,8 @@ router.post('/', authenticate, (req, res) => {
             
             // Validate required fields
             if (!fullname || !phone_number) {
-                console.log('Validation failed: missing required fields');
                 return res.status(400).json({ error: 'Full name and phone number are required' });
             }
-            
-            console.log('Checking for existing rider with phone:', phone_number);
             
             // Check if phone number already exists
             const existingRider = await client.query(
@@ -327,89 +332,95 @@ router.post('/', authenticate, (req, res) => {
             );
             
             if (existingRider.rows.length > 0) {
-                console.log('Rider with this phone already exists');
                 return res.status(409).json({ error: 'Rider with this phone number already exists' });
             }
             
-            // Upload images if provided
+            // Handle image uploads - only if files exist
             let profileImageUrl = null;
             let idImageUrl = null;
             let guarantor1IdImageUrl = null;
             let guarantor2IdImageUrl = null;
             
-            if (req.files && req.files.profile_image && req.files.profile_image[0]) {
-                console.log('Uploading profile image...');
-                profileImageUrl = await uploadImageToImgBB(req.files.profile_image[0].buffer);
-                console.log('Profile image uploaded:', profileImageUrl);
+            // Upload images if they exist
+            if (req.files) {
+                if (req.files.profile_image && req.files.profile_image[0]) {
+                    try {
+                        profileImageUrl = await uploadImageToImgBB(req.files.profile_image[0].buffer);
+                        console.log('Profile image uploaded:', profileImageUrl);
+                    } catch (uploadError) {
+                        console.error('Profile image upload failed:', uploadError);
+                    }
+                }
+                
+                if (req.files.id_image && req.files.id_image[0]) {
+                    try {
+                        idImageUrl = await uploadImageToImgBB(req.files.id_image[0].buffer);
+                        console.log('ID image uploaded:', idImageUrl);
+                    } catch (uploadError) {
+                        console.error('ID image upload failed:', uploadError);
+                    }
+                }
+                
+                if (req.files.guarantor1_id_image && req.files.guarantor1_id_image[0]) {
+                    try {
+                        guarantor1IdImageUrl = await uploadImageToImgBB(req.files.guarantor1_id_image[0].buffer);
+                        console.log('Guarantor 1 ID image uploaded:', guarantor1IdImageUrl);
+                    } catch (uploadError) {
+                        console.error('Guarantor 1 ID image upload failed:', uploadError);
+                    }
+                }
+                
+                if (req.files.guarantor2_id_image && req.files.guarantor2_id_image[0]) {
+                    try {
+                        guarantor2IdImageUrl = await uploadImageToImgBB(req.files.guarantor2_id_image[0].buffer);
+                        console.log('Guarantor 2 ID image uploaded:', guarantor2IdImageUrl);
+                    } catch (uploadError) {
+                        console.error('Guarantor 2 ID image upload failed:', uploadError);
+                    }
+                }
             }
             
-            if (req.files && req.files.id_image && req.files.id_image[0]) {
-                console.log('Uploading ID image...');
-                idImageUrl = await uploadImageToImgBB(req.files.id_image[0].buffer);
-                console.log('ID image uploaded:', idImageUrl);
-            }
-            
-            if (req.files && req.files.guarantor1_id_image && req.files.guarantor1_id_image[0]) {
-                console.log('Uploading guarantor 1 ID image...');
-                guarantor1IdImageUrl = await uploadImageToImgBB(req.files.guarantor1_id_image[0].buffer);
-                console.log('Guarantor 1 ID image uploaded:', guarantor1IdImageUrl);
-            }
-            
-            if (req.files && req.files.guarantor2_id_image && req.files.guarantor2_id_image[0]) {
-                console.log('Uploading guarantor 2 ID image...');
-                guarantor2IdImageUrl = await uploadImageToImgBB(req.files.guarantor2_id_image[0].buffer);
-                console.log('Guarantor 2 ID image uploaded:', guarantor2IdImageUrl);
-            }
-            
-            // Parse product_prices if it's a string
+            // Parse product_prices
             let parsedProductPrices = [];
             if (product_prices) {
                 try {
-                    parsedProductPrices = typeof product_prices === 'string' 
-                        ? JSON.parse(product_prices) 
-                        : product_prices;
-                    console.log('Parsed product prices:', parsedProductPrices);
+                    parsedProductPrices = JSON.parse(product_prices);
                 } catch (e) {
                     console.error('Error parsing product_prices:', e);
                     parsedProductPrices = [];
                 }
             }
             
-            // Create customer record first
+            // First, create customer record
             console.log('Creating customer record...');
-            const customerQuery = `
-                INSERT INTO customers (
+            const customerResult = await client.query(
+                `INSERT INTO customers (
                     fullname, phone, email, address, 
                     credit_limit, balance, is_rider, 
                     custom_price_multiplier, product_prices,
                     created_at, updated_at
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
-                RETURNING id
-            `;
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+                RETURNING id`,
+                [
+                    fullname,
+                    phone_number,
+                    email || null,
+                    address || null,
+                    credit_limit ? parseFloat(credit_limit) : 0,
+                    0,
+                    true,
+                    1.0,
+                    JSON.stringify(parsedProductPrices)
+                ]
+            );
             
-            const customerValues = [
-                fullname,
-                phone_number,
-                email || null,
-                address || null,
-                credit_limit ? parseFloat(credit_limit) : 0,
-                0, // initial balance
-                true, // is_rider
-                1.0, // default multiplier
-                JSON.stringify(parsedProductPrices)
-            ];
-            
-            console.log('Customer query values:', customerValues);
-            
-            const customerResult = await client.query(customerQuery, customerValues);
             const customerId = customerResult.rows[0].id;
             console.log('Customer created with ID:', customerId);
             
             // Create rider record
             console.log('Creating rider record...');
-            const riderQuery = `
-                INSERT INTO riders (
+            const riderResult = await client.query(
+                `INSERT INTO riders (
                     customer_id, fullname, phone_number, email, address, date_of_birth,
                     id_type, id_number, id_image_url, profile_image_url,
                     guarantor1_name, guarantor1_phone, guarantor1_address, guarantor1_relationship,
@@ -418,56 +429,50 @@ router.post('/', authenticate, (req, res) => {
                     guarantor2_id_type, guarantor2_id_number, guarantor2_id_image_url,
                     credit_limit, current_balance, payment_terms, default_payment_method, notes,
                     rider_product_prices, is_active, created_by, created_at, updated_at
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
                         $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31,
                         $32, $33, NOW(), NOW())
-                RETURNING id
-            `;
+                RETURNING id`,
+                [
+                    customerId,
+                    fullname,
+                    phone_number,
+                    email || null,
+                    address || null,
+                    date_of_birth || null,
+                    id_type || null,
+                    id_number || null,
+                    idImageUrl,
+                    profileImageUrl,
+                    guarantor1_name || null,
+                    guarantor1_phone || null,
+                    guarantor1_address || null,
+                    guarantor1_relationship || null,
+                    guarantor1_id_type || null,
+                    guarantor1_id_number || null,
+                    guarantor1IdImageUrl,
+                    guarantor2_name || null,
+                    guarantor2_phone || null,
+                    guarantor2_address || null,
+                    guarantor2_relationship || null,
+                    guarantor2_id_type || null,
+                    guarantor2_id_number || null,
+                    guarantor2IdImageUrl,
+                    credit_limit ? parseFloat(credit_limit) : 0,
+                    0,
+                    payment_terms || 'weekly',
+                    default_payment_method || 'Cash',
+                    notes || null,
+                    JSON.stringify(parsedProductPrices),
+                    true,
+                    req.user.id
+                ]
+            );
             
-            const riderValues = [
-                customerId, 
-                fullname, 
-                phone_number, 
-                email || null, 
-                address || null, 
-                date_of_birth || null,
-                id_type || null, 
-                id_number || null, 
-                idImageUrl, 
-                profileImageUrl,
-                guarantor1_name || null, 
-                guarantor1_phone || null, 
-                guarantor1_address || null, 
-                guarantor1_relationship || null,
-                guarantor1_id_type || null, 
-                guarantor1_id_number || null, 
-                guarantor1IdImageUrl,
-                guarantor2_name || null, 
-                guarantor2_phone || null, 
-                guarantor2_address || null, 
-                guarantor2_relationship || null,
-                guarantor2_id_type || null, 
-                guarantor2_id_number || null, 
-                guarantor2IdImageUrl,
-                credit_limit ? parseFloat(credit_limit) : 0, 
-                0, 
-                payment_terms || 'weekly', 
-                default_payment_method || 'Cash', 
-                notes || null,
-                JSON.stringify(parsedProductPrices),
-                true,
-                req.user.id
-            ];
-            
-            console.log('Rider query values length:', riderValues.length);
-            
-            const riderResult = await client.query(riderQuery, riderValues);
             const riderId = riderResult.rows[0].id;
             console.log('Rider created with ID:', riderId);
             
             await client.query('COMMIT');
-            console.log('Transaction committed successfully');
             
             res.status(201).json({
                 message: 'Rider created successfully',
@@ -478,17 +483,16 @@ router.post('/', authenticate, (req, res) => {
         } catch (error) {
             await client.query('ROLLBACK');
             console.error('=== ERROR CREATING RIDER ===');
-            console.error('Error name:', error.name);
+            console.error('Error:', error);
             console.error('Error message:', error.message);
             console.error('Error stack:', error.stack);
             
             res.status(500).json({ 
                 error: 'Failed to create rider', 
-                details: error.message
+                details: error.message 
             });
         } finally {
             client.release();
-            console.log('=== Rider creation process completed ===');
         }
     });
 });
