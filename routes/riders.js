@@ -497,7 +497,9 @@ router.post('/', authenticate, (req, res) => {
                 console.log('New customer created with ID:', customerId);
             }
             
-            // Create rider record - FIXED: Now using 34 parameters to match 34 columns
+            // Create rider record - FIXED: Counted columns from schema.sql
+            // According to your schema.sql, the riders table has these columns:
+            // Let's list them exactly as they appear in the schema:
             console.log('Creating rider record...');
             const riderResult = await client.query(
                 `INSERT INTO riders (
@@ -511,7 +513,7 @@ router.post('/', authenticate, (req, res) => {
                     rider_product_prices, is_active, created_by, created_at, updated_at
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
                         $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31,
-                        $32, $33, NOW(), NOW())
+                        $32, NOW(), NOW())
                 RETURNING id`,
                 [
                     customerId,                 // $1
@@ -546,8 +548,7 @@ router.post('/', authenticate, (req, res) => {
                     JSON.stringify(parsedProductPrices), // $30
                     true,                           // $31 (is_active)
                     req.user ? req.user.id : null,  // $32 (created_by)
-                    // $33 is NOW() for created_at
-                    // $34 is NOW() for updated_at
+                    // created_at and updated_at are NOW() in the query
                 ]
             );
             
