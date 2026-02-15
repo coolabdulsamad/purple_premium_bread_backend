@@ -261,7 +261,7 @@ router.get('/:id', authenticate, async (req, res) => {
     }
 });
 
-// POST /api/riders - Create new rider
+// POST /api/riders - Create new rider (with better error handling)
 router.post('/', authenticate, upload.fields([
     { name: 'profile_image', maxCount: 1 },
     { name: 'id_image', maxCount: 1 },
@@ -271,6 +271,10 @@ router.post('/', authenticate, upload.fields([
     const client = await db.pool.connect();
     
     try {
+        console.log('=== Starting rider creation ===');
+        console.log('Request body:', req.body);
+        console.log('Files received:', req.files ? Object.keys(req.files) : 'No files');
+        
         await client.query('BEGIN');
         
         const {
@@ -286,8 +290,11 @@ router.post('/', authenticate, upload.fields([
         
         // Validate required fields
         if (!fullname || !phone_number) {
+            console.log('Validation failed: missing required fields');
             return res.status(400).json({ error: 'Full name and phone number are required' });
         }
+        
+        console.log('Checking for existing rider with phone:', phone_number);
         
         // Check if phone number already exists
         const existingRider = await client.query(
@@ -296,6 +303,7 @@ router.post('/', authenticate, upload.fields([
         );
         
         if (existingRider.rows.length > 0) {
+            console.log('Rider with this phone already exists');
             return res.status(409).json({ error: 'Rider with this phone number already exists' });
         }
         
@@ -305,31 +313,61 @@ router.post('/', authenticate, upload.fields([
         let guarantor1IdImageUrl = null;
         let guarantor2IdImageUrl = null;
         
-        if (req.files.profile_image) {
+        if (req.files && req.files.profile_image) {
+            console.log('Uploading profile image...');
             profileImageUrl = await uploadImageToImgBB(req.files.profile_image[0].buffer);
+            console.log('Profile image uploaded:', profileImageUrl);
         }
         
-        if (req.files.id_image) {
+        if (req.files && req.files.id_image) {
+            console.log('Uploading ID image...');
             idImageUrl = await uploadImageToImgBB(req.files.id_image[0].buffer);
+            console.log('ID image uploaded:', idImageUrl);
         }
         
-        if (req.files.guarantor1_id_image) {
+        if (req.files && req.files.guarantor1_id_image) {
+            console.log('Uploading guarantor 1 ID image...');
             guarantor1IdImageUrl = await uploadImageToImgBB(req.files.guarantor1_id_image[0].buffer);
+            console.log('Guarantor 1 ID image uploaded:', guarantor1IdImageUrl);
         }
         
-        if (req.files.guarantor2_id_image) {
+        if (req.files && req.files.guarantor2_id_image) {
+            console.log('Uploading guarantor 2 ID image...');
             guarantor2IdImageUrl = await uploadImageToImgBB(req.files.guarantor2_id_image[0].buffer);
+            console.log('Guarantor 2 ID image uploaded:', guarantor2IdImageUrl);
         }
         
         // Parse product_prices if it's a string
         let parsedProductPrices = {};
         if (product_prices) {
-            parsedProductPrices = typeof product_prices === 'string' 
-                ? JSON.parse(product_prices) 
-                : product_prices;
+            try {
+                parsedProductPrices = typeof product_prices === 'string' 
+                    ? JSON.parse(product_prices) 
+                    : product_prices;
+                console.log('Parsed product prices:', parsedProductPrices);
+            } catch (e) {
+                console.error('Error parsing product_prices:', e);
+                parsedProductPrices = {};
+            }
+        }
+        
+        // First, check if customers table exists
+        const checkCustomersTable = await client.query(`
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'customers'
+            );
+        `);
+        
+        console.log('Customers table exists:', checkCustomersTable.rows[0].exists);
+        
+        if (!checkCustomersTable.rows[0].exists) {
+            throw new Error('Customers table does not exist. Please run database migrations first.');
         }
         
         // Create customer record first
+        console.log('Creating customer record...');
         const customerQuery = `
             INSERT INTO customers (
                 fullname, phone, email, address, 
@@ -341,21 +379,41 @@ router.post('/', authenticate, upload.fields([
             RETURNING id
         `;
         
-        const customerResult = await client.query(customerQuery, [
+        const customerValues = [
             fullname,
             phone_number,
             email || null,
             address || null,
-            credit_limit || 0,
+            credit_limit ? parseFloat(credit_limit) : 0,
             0, // initial balance
             true, // is_rider
             1.0, // default multiplier
             JSON.stringify(parsedProductPrices)
-        ]);
+        ];
         
+        console.log('Customer query values:', customerValues);
+        
+        const customerResult = await client.query(customerQuery, customerValues);
         const customerId = customerResult.rows[0].id;
+        console.log('Customer created with ID:', customerId);
+        
+        // Check if riders table exists
+        const checkRidersTable = await client.query(`
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'riders'
+            );
+        `);
+        
+        console.log('Riders table exists:', checkRidersTable.rows[0].exists);
+        
+        if (!checkRidersTable.rows[0].exists) {
+            throw new Error('Riders table does not exist. Please run database migrations first.');
+        }
         
         // Create rider record
+        console.log('Creating rider record...');
         const riderQuery = `
             INSERT INTO riders (
                 customer_id, fullname, phone_number, email, address, date_of_birth,
@@ -369,37 +427,81 @@ router.post('/', authenticate, upload.fields([
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
                     $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31,
-                    NOW(), NOW())
+                    $32, $33, NOW(), NOW())
             RETURNING id
         `;
         
-        const riderResult = await client.query(riderQuery, [
-            customerId, fullname, phone_number, email || null, address || null, date_of_birth || null,
-            id_type || null, id_number || null, idImageUrl, profileImageUrl,
-            guarantor1_name || null, guarantor1_phone || null, guarantor1_address || null, guarantor1_relationship || null,
-            guarantor1_id_type || null, guarantor1_id_number || null, guarantor1IdImageUrl,
-            guarantor2_name || null, guarantor2_phone || null, guarantor2_address || null, guarantor2_relationship || null,
-            guarantor2_id_type || null, guarantor2_id_number || null, guarantor2IdImageUrl,
-            credit_limit || 0, 0, payment_terms || 'weekly', default_payment_method || 'Cash', notes || null,
+        const riderValues = [
+            customerId, 
+            fullname, 
+            phone_number, 
+            email || null, 
+            address || null, 
+            date_of_birth || null,
+            id_type || null, 
+            id_number || null, 
+            idImageUrl, 
+            profileImageUrl,
+            guarantor1_name || null, 
+            guarantor1_phone || null, 
+            guarantor1_address || null, 
+            guarantor1_relationship || null,
+            guarantor1_id_type || null, 
+            guarantor1_id_number || null, 
+            guarantor1IdImageUrl,
+            guarantor2_name || null, 
+            guarantor2_phone || null, 
+            guarantor2_address || null, 
+            guarantor2_relationship || null,
+            guarantor2_id_type || null, 
+            guarantor2_id_number || null, 
+            guarantor2IdImageUrl,
+            credit_limit ? parseFloat(credit_limit) : 0, 
+            0, 
+            payment_terms || 'weekly', 
+            default_payment_method || 'Cash', 
+            notes || null,
             JSON.stringify(parsedProductPrices),
             true,
             req.user.id
-        ]);
+        ];
+        
+        console.log('Rider query values length:', riderValues.length);
+        console.log('First few rider values:', riderValues.slice(0, 5));
+        
+        const riderResult = await client.query(riderQuery, riderValues);
+        const riderId = riderResult.rows[0].id;
+        console.log('Rider created with ID:', riderId);
         
         await client.query('COMMIT');
+        console.log('Transaction committed successfully');
         
         res.status(201).json({
             message: 'Rider created successfully',
-            riderId: riderResult.rows[0].id,
+            riderId: riderId,
             customerId: customerId
         });
         
     } catch (error) {
         await client.query('ROLLBACK');
-        console.error('Error creating rider:', error);
-        res.status(500).json({ error: 'Failed to create rider', details: error.message });
+        console.error('=== ERROR CREATING RIDER ===');
+        console.error('Error name:', error.name);
+        console.error('Error message:', error.message);
+        console.error('Error stack:', error.stack);
+        console.error('Error detail:', error.detail);
+        console.error('Error code:', error.code);
+        console.error('Error position:', error.position);
+        
+        // Send detailed error in development, generic in production
+        const isDev = process.env.NODE_ENV === 'development';
+        res.status(500).json({ 
+            error: 'Failed to create rider', 
+            details: isDev ? error.message : 'Internal server error',
+            code: error.code || 'UNKNOWN'
+        });
     } finally {
         client.release();
+        console.log('=== Rider creation process completed ===');
     }
 });
 
