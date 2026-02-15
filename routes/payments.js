@@ -197,7 +197,7 @@ router.get('/customer/:customerId', async (req, res) => {
 // GET /api/payments/rider/:riderId - Get payment history for a rider
 router.get('/rider/:riderId', authenticate, async (req, res) => {
     const { riderId } = req.params;
-    
+
     try {
         const query = `
             SELECT 
@@ -209,10 +209,10 @@ router.get('/rider/:riderId', authenticate, async (req, res) => {
             WHERE p.rider_id = $1
             ORDER BY p.payment_date DESC
         `;
-        
+
         const result = await db.query(query, [riderId]);
         res.status(200).json(result.rows);
-        
+
     } catch (error) {
         console.error('Error fetching rider payments:', error);
         res.status(500).json({ error: 'Failed to fetch payment history', details: error.message });
@@ -222,7 +222,7 @@ router.get('/rider/:riderId', authenticate, async (req, res) => {
 // GET /api/sales/rider/:riderId/outstanding - Get outstanding sales for a rider
 router.get('/rider/:riderId/outstanding', authenticate, async (req, res) => {
     const { riderId } = req.params;
-    
+
     try {
         const query = `
             SELECT 
@@ -237,10 +237,10 @@ router.get('/rider/:riderId/outstanding', authenticate, async (req, res) => {
             WHERE rider_id = $1 AND balance_due > 0
             ORDER BY sale_date ASC
         `;
-        
+
         const result = await db.query(query, [riderId]);
         res.status(200).json(result.rows);
-        
+
     } catch (error) {
         console.error('Error fetching outstanding rider sales:', error);
         res.status(500).json({ error: 'Failed to fetch outstanding sales', details: error.message });
@@ -256,12 +256,12 @@ router.post('/rider', authenticate, async (req, res) => {
         payment_method,
         proof
     } = req.body;
-    
+
     const client = await db.pool.connect();
-    
+
     try {
         await client.query('BEGIN');
-        
+
         // Insert payment record
         const paymentQuery = `
             INSERT INTO payments (
@@ -270,11 +270,11 @@ router.post('/rider', authenticate, async (req, res) => {
             VALUES ($1, $2, $3, $4, $5, NOW())
             RETURNING *
         `;
-        
+
         const paymentResult = await client.query(paymentQuery, [
             transaction_id, rider_id, amount, payment_method, proof
         ]);
-        
+
         // Update the sales transaction
         const updateSaleQuery = `
             UPDATE sales_transactions
@@ -289,9 +289,9 @@ router.post('/rider', authenticate, async (req, res) => {
             WHERE id = $2
             RETURNING *
         `;
-        
+
         const saleResult = await client.query(updateSaleQuery, [amount, transaction_id]);
-        
+
         // Update rider's current balance
         const updateRiderQuery = `
             UPDATE riders
@@ -299,17 +299,17 @@ router.post('/rider', authenticate, async (req, res) => {
                 updated_at = NOW()
             WHERE id = $2
         `;
-        
+
         await client.query(updateRiderQuery, [amount, rider_id]);
-        
+
         await client.query('COMMIT');
-        
+
         res.status(201).json({
             message: 'Payment recorded successfully',
             payment: paymentResult.rows[0],
             updated_sale: saleResult.rows[0]
         });
-        
+
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('Error recording rider payment:', error);
