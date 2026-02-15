@@ -12,7 +12,7 @@ const IMGBB_API_KEY = '77c9bd669b4a5491c1ec247d8d79e866';
 // Configure multer for memory storage with proper error handling
 const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { 
+    limits: {
         fileSize: 5 * 1024 * 1024, // 5MB limit
         files: 4 // Maximum 4 files
     },
@@ -30,11 +30,11 @@ const uploadImageToImgBB = async (imageBuffer) => {
     try {
         // Convert buffer to base64
         const base64Image = imageBuffer.toString('base64');
-        
+
         // Create form data
         const formData = new URLSearchParams();
         formData.append('image', base64Image);
-        
+
         const response = await axios.post(
             `https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`,
             formData.toString(),
@@ -44,7 +44,7 @@ const uploadImageToImgBB = async (imageBuffer) => {
                 }
             }
         );
-        
+
         if (response.data && response.data.success) {
             return response.data.data.url;
         } else {
@@ -60,12 +60,12 @@ const uploadImageToImgBB = async (imageBuffer) => {
 // GET /api/riders - Fetch riders with filters and pagination
 router.get('/', authenticate, async (req, res) => {
     const userRole = req.user.role?.toUpperCase();
-    
+
     // Check permissions
     if (!['ADMIN', 'MANAGER', 'ACCOUNTANT', 'SALES'].includes(userRole)) {
         return res.status(403).json({ error: 'Unauthorized to view riders' });
     }
-    
+
     const {
         searchTerm,
         status,
@@ -82,9 +82,9 @@ router.get('/', authenticate, async (req, res) => {
         limit = 10,
         export: exportData
     } = req.query;
-    
+
     const offset = (parseInt(page) - 1) * parseInt(limit);
-    
+
     try {
         // Build the base query
         let query = `
@@ -101,10 +101,10 @@ router.get('/', authenticate, async (req, res) => {
             LEFT JOIN customers c ON r.customer_id = c.id
             WHERE 1=1
         `;
-        
+
         const params = [];
         let paramIndex = 1;
-        
+
         // Apply filters
         if (searchTerm) {
             query += ` AND (
@@ -117,75 +117,75 @@ router.get('/', authenticate, async (req, res) => {
             params.push(`%${searchTerm}%`);
             paramIndex++;
         }
-        
+
         if (status === 'active') {
             query += ` AND r.is_active = true`;
         } else if (status === 'inactive') {
             query += ` AND r.is_active = false`;
         }
-        
+
         if (minCredit) {
             query += ` AND r.credit_limit >= $${paramIndex}`;
             params.push(parseFloat(minCredit));
             paramIndex++;
         }
-        
+
         if (maxCredit) {
             query += ` AND r.credit_limit <= $${paramIndex}`;
             params.push(parseFloat(maxCredit));
             paramIndex++;
         }
-        
+
         if (minBalance) {
             query += ` AND r.current_balance >= $${paramIndex}`;
             params.push(parseFloat(minBalance));
             paramIndex++;
         }
-        
+
         if (maxBalance) {
             query += ` AND r.current_balance <= $${paramIndex}`;
             params.push(parseFloat(maxBalance));
             paramIndex++;
         }
-        
+
         if (dateFrom) {
             query += ` AND DATE(r.created_at) >= $${paramIndex}`;
             params.push(dateFrom);
             paramIndex++;
         }
-        
+
         if (dateTo) {
             query += ` AND DATE(r.created_at) <= $${paramIndex}`;
             params.push(dateTo);
             paramIndex++;
         }
-        
+
         if (hasOutstanding === 'yes') {
             query += ` AND r.current_balance > 0`;
         } else if (hasOutstanding === 'no') {
             query += ` AND r.current_balance = 0`;
         }
-        
+
         // Get total count for pagination
         const countQuery = `SELECT COUNT(*) FROM (${query}) as count`;
         const countResult = await db.query(countQuery, params);
         const total = parseInt(countResult.rows[0].count);
-        
+
         // Add sorting and pagination
         const validSortFields = ['fullname', 'credit_limit', 'current_balance', 'created_at'];
         const sortField = validSortFields.includes(sortBy) ? sortBy : 'fullname';
         const order = sortOrder.toLowerCase() === 'desc' ? 'DESC' : 'ASC';
-        
+
         query += ` ORDER BY r.${sortField} ${order}`;
-        
+
         // If not exporting, add pagination
         if (exportData !== 'true') {
             query += ` LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
             params.push(parseInt(limit), offset);
         }
-        
+
         const result = await db.query(query, params);
-        
+
         // Get statistics
         const statsQuery = `
             SELECT 
@@ -198,7 +198,7 @@ router.get('/', authenticate, async (req, res) => {
             WHERE 1=1
         `;
         const statsResult = await db.query(statsQuery);
-        
+
         res.status(200).json({
             riders: result.rows,
             total,
@@ -207,7 +207,7 @@ router.get('/', authenticate, async (req, res) => {
             totalPages: Math.ceil(total / parseInt(limit)),
             stats: statsResult.rows[0]
         });
-        
+
     } catch (error) {
         console.error('Error fetching riders:', error);
         res.status(500).json({ error: 'Failed to fetch riders', details: error.message });
@@ -217,7 +217,7 @@ router.get('/', authenticate, async (req, res) => {
 // GET /api/riders/:id - Get single rider details
 router.get('/:id', authenticate, async (req, res) => {
     const { id } = req.params;
-    
+
     try {
         const query = `
             SELECT 
@@ -260,26 +260,24 @@ router.get('/:id', authenticate, async (req, res) => {
             LEFT JOIN customers c ON r.customer_id = c.id
             WHERE r.id = $1
         `;
-        
+
         const result = await db.query(query, [id]);
-        
+
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'Rider not found' });
         }
-        
+
         res.status(200).json(result.rows[0]);
-        
+
     } catch (error) {
         console.error('Error fetching rider:', error);
         res.status(500).json({ error: 'Failed to fetch rider', details: error.message });
     }
 });
 
-// purple-premium-bread-api/routes/riders.js - FIXED POST ROUTE
-
 // POST /api/riders - Create new rider (FIXED VERSION)
 router.post('/', authenticate, async (req, res) => {
-    // Use a simpler multer configuration
+    // Use a simpler multer configuration with proper error handling
     const uploadMiddleware = multer({
         storage: multer.memoryStorage(),
         limits: { fileSize: 5 * 1024 * 1024 }
@@ -293,21 +291,32 @@ router.post('/', authenticate, async (req, res) => {
     uploadMiddleware(req, res, async (err) => {
         if (err) {
             console.error('Multer error:', err);
-            return res.status(400).json({ 
-                error: 'File upload error', 
-                details: err.message 
+
+            // Check if it's the "Unexpected end of form" error
+            if (err.message === 'Unexpected end of form') {
+                // This often happens when the request doesn't have proper multipart boundaries
+                // Let's try to parse the request manually or return a more helpful error
+                return res.status(400).json({
+                    error: 'Invalid form data. Please check your form submission.',
+                    details: 'The request did not contain valid multipart form data. Make sure you are using FormData correctly.'
+                });
+            }
+
+            return res.status(400).json({
+                error: 'File upload error',
+                details: err.message
             });
         }
 
         const client = await db.pool.connect();
-        
+
         try {
             console.log('=== Starting rider creation ===');
             console.log('Request body:', req.body);
             console.log('Files:', req.files ? Object.keys(req.files) : 'No files');
-            
+
             await client.query('BEGIN');
-            
+
             // Extract all fields from req.body
             const {
                 fullname, phone_number, email, address, date_of_birth,
@@ -319,40 +328,41 @@ router.post('/', authenticate, async (req, res) => {
                 credit_limit, payment_terms, default_payment_method, notes,
                 product_prices
             } = req.body;
-            
+
             // Validate required fields
             if (!fullname || !phone_number) {
                 return res.status(400).json({ error: 'Full name and phone number are required' });
             }
-            
+
             // Check if phone number already exists
             const existingRider = await client.query(
                 'SELECT id FROM riders WHERE phone_number = $1',
                 [phone_number]
             );
-            
+
             if (existingRider.rows.length > 0) {
                 return res.status(409).json({ error: 'Rider with this phone number already exists' });
             }
-            
+
             // Handle image uploads - only if files exist
             let profileImageUrl = null;
             let idImageUrl = null;
             let guarantor1IdImageUrl = null;
             let guarantor2IdImageUrl = null;
-            
-            // Upload images if they exist
+
+            // Upload images if they exist and have buffer data
             if (req.files) {
-                if (req.files.profile_image && req.files.profile_image[0]) {
+                if (req.files.profile_image && req.files.profile_image[0] && req.files.profile_image[0].buffer) {
                     try {
                         profileImageUrl = await uploadImageToImgBB(req.files.profile_image[0].buffer);
                         console.log('Profile image uploaded:', profileImageUrl);
                     } catch (uploadError) {
                         console.error('Profile image upload failed:', uploadError);
+                        // Continue without image if upload fails
                     }
                 }
-                
-                if (req.files.id_image && req.files.id_image[0]) {
+
+                if (req.files.id_image && req.files.id_image[0] && req.files.id_image[0].buffer) {
                     try {
                         idImageUrl = await uploadImageToImgBB(req.files.id_image[0].buffer);
                         console.log('ID image uploaded:', idImageUrl);
@@ -360,8 +370,8 @@ router.post('/', authenticate, async (req, res) => {
                         console.error('ID image upload failed:', uploadError);
                     }
                 }
-                
-                if (req.files.guarantor1_id_image && req.files.guarantor1_id_image[0]) {
+
+                if (req.files.guarantor1_id_image && req.files.guarantor1_id_image[0] && req.files.guarantor1_id_image[0].buffer) {
                     try {
                         guarantor1IdImageUrl = await uploadImageToImgBB(req.files.guarantor1_id_image[0].buffer);
                         console.log('Guarantor 1 ID image uploaded:', guarantor1IdImageUrl);
@@ -369,8 +379,8 @@ router.post('/', authenticate, async (req, res) => {
                         console.error('Guarantor 1 ID image upload failed:', uploadError);
                     }
                 }
-                
-                if (req.files.guarantor2_id_image && req.files.guarantor2_id_image[0]) {
+
+                if (req.files.guarantor2_id_image && req.files.guarantor2_id_image[0] && req.files.guarantor2_id_image[0].buffer) {
                     try {
                         guarantor2IdImageUrl = await uploadImageToImgBB(req.files.guarantor2_id_image[0].buffer);
                         console.log('Guarantor 2 ID image uploaded:', guarantor2IdImageUrl);
@@ -379,18 +389,20 @@ router.post('/', authenticate, async (req, res) => {
                     }
                 }
             }
-            
+
             // Parse product_prices
             let parsedProductPrices = [];
             if (product_prices) {
                 try {
-                    parsedProductPrices = JSON.parse(product_prices);
+                    parsedProductPrices = typeof product_prices === 'string'
+                        ? JSON.parse(product_prices)
+                        : product_prices;
                 } catch (e) {
                     console.error('Error parsing product_prices:', e);
                     parsedProductPrices = [];
                 }
             }
-            
+
             // First, create customer record
             console.log('Creating customer record...');
             const customerResult = await client.query(
@@ -413,10 +425,10 @@ router.post('/', authenticate, async (req, res) => {
                     JSON.stringify(parsedProductPrices)
                 ]
             );
-            
+
             const customerId = customerResult.rows[0].id;
             console.log('Customer created with ID:', customerId);
-            
+
             // Create rider record
             console.log('Creating rider record...');
             const riderResult = await client.query(
@@ -468,28 +480,28 @@ router.post('/', authenticate, async (req, res) => {
                     req.user.id
                 ]
             );
-            
+
             const riderId = riderResult.rows[0].id;
             console.log('Rider created with ID:', riderId);
-            
+
             await client.query('COMMIT');
-            
+
             res.status(201).json({
                 message: 'Rider created successfully',
                 riderId: riderId,
                 customerId: customerId
             });
-            
+
         } catch (error) {
             await client.query('ROLLBACK');
             console.error('=== ERROR CREATING RIDER ===');
             console.error('Error:', error);
             console.error('Error message:', error.message);
             console.error('Error stack:', error.stack);
-            
-            res.status(500).json({ 
-                error: 'Failed to create rider', 
-                details: error.message 
+
+            res.status(500).json({
+                error: 'Failed to create rider',
+                details: error.message
             });
         } finally {
             client.release();
@@ -507,18 +519,18 @@ router.put('/:id', authenticate, (req, res) => {
     ])(req, res, async (err) => {
         if (err) {
             console.error('Multer error:', err);
-            return res.status(400).json({ 
-                error: 'File upload error', 
-                details: err.message 
+            return res.status(400).json({
+                error: 'File upload error',
+                details: err.message
             });
         }
 
         const { id } = req.params;
         const client = await db.pool.connect();
-        
+
         try {
             await client.query('BEGIN');
-            
+
             const {
                 fullname, phone_number, email, address, date_of_birth,
                 id_type, id_number,
@@ -529,49 +541,49 @@ router.put('/:id', authenticate, (req, res) => {
                 credit_limit, payment_terms, default_payment_method, notes,
                 product_prices, is_active
             } = req.body;
-            
+
             // Get current rider info to get customer_id
             const currentRider = await client.query(
                 'SELECT customer_id FROM riders WHERE id = $1',
                 [id]
             );
-            
+
             if (currentRider.rows.length === 0) {
                 return res.status(404).json({ error: 'Rider not found' });
             }
-            
+
             const customerId = currentRider.rows[0].customer_id;
-            
+
             // Upload new images if provided
             let profileImageUrl = null;
             let idImageUrl = null;
             let guarantor1IdImageUrl = null;
             let guarantor2IdImageUrl = null;
-            
+
             if (req.files && req.files.profile_image && req.files.profile_image[0]) {
                 profileImageUrl = await uploadImageToImgBB(req.files.profile_image[0].buffer);
             }
-            
+
             if (req.files && req.files.id_image && req.files.id_image[0]) {
                 idImageUrl = await uploadImageToImgBB(req.files.id_image[0].buffer);
             }
-            
+
             if (req.files && req.files.guarantor1_id_image && req.files.guarantor1_id_image[0]) {
                 guarantor1IdImageUrl = await uploadImageToImgBB(req.files.guarantor1_id_image[0].buffer);
             }
-            
+
             if (req.files && req.files.guarantor2_id_image && req.files.guarantor2_id_image[0]) {
                 guarantor2IdImageUrl = await uploadImageToImgBB(req.files.guarantor2_id_image[0].buffer);
             }
-            
+
             // Parse product_prices
             let parsedProductPrices = [];
             if (product_prices) {
-                parsedProductPrices = typeof product_prices === 'string' 
-                    ? JSON.parse(product_prices) 
+                parsedProductPrices = typeof product_prices === 'string'
+                    ? JSON.parse(product_prices)
                     : product_prices;
             }
-            
+
             // Update customer record
             const customerUpdateQuery = `
                 UPDATE customers
@@ -584,7 +596,7 @@ router.put('/:id', authenticate, (req, res) => {
                     updated_at = NOW()
                 WHERE id = $7
             `;
-            
+
             await client.query(customerUpdateQuery, [
                 fullname || null,
                 phone_number || null,
@@ -594,12 +606,12 @@ router.put('/:id', authenticate, (req, res) => {
                 JSON.stringify(parsedProductPrices),
                 customerId
             ]);
-            
+
             // Build rider update query dynamically
             const riderUpdateFields = [];
             const riderUpdateValues = [];
             let valueIndex = 1;
-            
+
             const updateFields = {
                 fullname, phone_number, email, address, date_of_birth,
                 id_type, id_number,
@@ -611,18 +623,18 @@ router.put('/:id', authenticate, (req, res) => {
                 is_active,
                 updated_by: req.user.id
             };
-            
+
             // Add rider_product_prices separately as JSONB
             if (parsedProductPrices.length > 0) {
                 updateFields.rider_product_prices = parsedProductPrices;
             }
-            
+
             // Add image URLs if new images were uploaded
             if (profileImageUrl) updateFields.profile_image_url = profileImageUrl;
             if (idImageUrl) updateFields.id_image_url = idImageUrl;
             if (guarantor1IdImageUrl) updateFields.guarantor1_id_image_url = guarantor1IdImageUrl;
             if (guarantor2IdImageUrl) updateFields.guarantor2_id_image_url = guarantor2IdImageUrl;
-            
+
             Object.entries(updateFields).forEach(([key, value]) => {
                 if (value !== null && value !== undefined && value !== '') {
                     if (key === 'rider_product_prices') {
@@ -636,10 +648,10 @@ router.put('/:id', authenticate, (req, res) => {
                     }
                 }
             });
-            
+
             // Always update updated_at
             riderUpdateFields.push(`updated_at = NOW()`);
-            
+
             if (riderUpdateFields.length > 0) {
                 const riderUpdateQuery = `
                     UPDATE riders
@@ -647,14 +659,14 @@ router.put('/:id', authenticate, (req, res) => {
                     WHERE id = $${valueIndex}
                 `;
                 riderUpdateValues.push(id);
-                
+
                 await client.query(riderUpdateQuery, riderUpdateValues);
             }
-            
+
             await client.query('COMMIT');
-            
+
             res.status(200).json({ message: 'Rider updated successfully' });
-            
+
         } catch (error) {
             await client.query('ROLLBACK');
             console.error('Error updating rider:', error);
@@ -669,35 +681,35 @@ router.put('/:id', authenticate, (req, res) => {
 router.patch('/:id/toggle-status', authenticate, async (req, res) => {
     const { id } = req.params;
     const { is_active } = req.body;
-    
+
     const client = await db.pool.connect();
-    
+
     try {
         await client.query('BEGIN');
-        
+
         const riderResult = await client.query(
             'SELECT customer_id FROM riders WHERE id = $1',
             [id]
         );
-        
+
         if (riderResult.rows.length === 0) {
             return res.status(404).json({ error: 'Rider not found' });
         }
-        
+
         const customerId = riderResult.rows[0].customer_id;
-        
+
         // Update rider status
         await client.query(
             'UPDATE riders SET is_active = $1, updated_at = NOW() WHERE id = $2',
             [is_active, id]
         );
-        
+
         await client.query('COMMIT');
-        
-        res.status(200).json({ 
-            message: `Rider ${is_active ? 'activated' : 'deactivated'} successfully` 
+
+        res.status(200).json({
+            message: `Rider ${is_active ? 'activated' : 'deactivated'} successfully`
         });
-        
+
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('Error toggling rider status:', error);
@@ -711,65 +723,65 @@ router.patch('/:id/toggle-status', authenticate, async (req, res) => {
 router.delete('/:id', authenticate, async (req, res) => {
     const { id } = req.params;
     const userRole = req.user.role?.toUpperCase();
-    
+
     if (userRole !== 'ADMIN') {
         return res.status(403).json({ error: 'Only administrators can delete riders' });
     }
-    
+
     const client = await db.pool.connect();
-    
+
     try {
         await client.query('BEGIN');
-        
+
         const riderResult = await client.query(
             'SELECT customer_id FROM riders WHERE id = $1',
             [id]
         );
-        
+
         if (riderResult.rows.length === 0) {
             return res.status(404).json({ error: 'Rider not found' });
         }
-        
+
         const customerId = riderResult.rows[0].customer_id;
-        
+
         // Check if rider has any sales or payments
         const salesCheck = await client.query(
             'SELECT id FROM sales_transactions WHERE rider_id = $1 LIMIT 1',
             [id]
         );
-        
+
         const paymentsCheck = await client.query(
             'SELECT id FROM payments WHERE rider_id = $1 LIMIT 1',
             [id]
         );
-        
+
         if (salesCheck.rows.length > 0 || paymentsCheck.rows.length > 0) {
             // Soft delete - just deactivate
             await client.query(
                 'UPDATE riders SET is_active = false, updated_at = NOW() WHERE id = $1',
                 [id]
             );
-            
+
             await client.query('COMMIT');
-            
-            return res.status(200).json({ 
-                message: 'Rider has associated transactions. Deactivated instead of deleted.' 
+
+            return res.status(200).json({
+                message: 'Rider has associated transactions. Deactivated instead of deleted.'
             });
         }
-        
+
         // Hard delete if no transactions
         await client.query('DELETE FROM riders WHERE id = $1', [id]);
-        
+
         // Update customer
         await client.query(
             'UPDATE customers SET is_rider = false, updated_at = NOW() WHERE id = $1',
             [customerId]
         );
-        
+
         await client.query('COMMIT');
-        
+
         res.status(200).json({ message: 'Rider deleted successfully' });
-        
+
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('Error deleting rider:', error);
@@ -793,7 +805,7 @@ router.get('/export', authenticate, async (req, res) => {
             dateTo,
             hasOutstanding
         } = req.query;
-        
+
         let query = `
             SELECT 
                 r.fullname,
@@ -816,10 +828,10 @@ router.get('/export', authenticate, async (req, res) => {
             LEFT JOIN customers c ON r.customer_id = c.id
             WHERE 1=1
         `;
-        
+
         const params = [];
         let paramIndex = 1;
-        
+
         // Apply same filters as the GET endpoint
         if (searchTerm) {
             query += ` AND (
@@ -830,61 +842,61 @@ router.get('/export', authenticate, async (req, res) => {
             params.push(`%${searchTerm}%`);
             paramIndex++;
         }
-        
+
         if (status === 'active') {
             query += ` AND r.is_active = true`;
         } else if (status === 'inactive') {
             query += ` AND r.is_active = false`;
         }
-        
+
         if (minCredit) {
             query += ` AND r.credit_limit >= $${paramIndex}`;
             params.push(parseFloat(minCredit));
             paramIndex++;
         }
-        
+
         if (maxCredit) {
             query += ` AND r.credit_limit <= $${paramIndex}`;
             params.push(parseFloat(maxCredit));
             paramIndex++;
         }
-        
+
         if (minBalance) {
             query += ` AND r.current_balance >= $${paramIndex}`;
             params.push(parseFloat(minBalance));
             paramIndex++;
         }
-        
+
         if (maxBalance) {
             query += ` AND r.current_balance <= $${paramIndex}`;
             params.push(parseFloat(maxBalance));
             paramIndex++;
         }
-        
+
         if (dateFrom) {
             query += ` AND DATE(r.created_at) >= $${paramIndex}`;
             params.push(dateFrom);
             paramIndex++;
         }
-        
+
         if (dateTo) {
             query += ` AND DATE(r.created_at) <= $${paramIndex}`;
             params.push(dateTo);
             paramIndex++;
         }
-        
+
         if (hasOutstanding === 'yes') {
             query += ` AND r.current_balance > 0`;
         } else if (hasOutstanding === 'no') {
             query += ` AND r.current_balance = 0`;
         }
-        
+
         query += ` ORDER BY r.fullname ASC`;
-        
+
         const result = await db.query(query, params);
-        
+
         res.status(200).json(result.rows);
-        
+
     } catch (error) {
         console.error('Error exporting riders:', error);
         res.status(500).json({ error: 'Failed to export riders', details: error.message });
