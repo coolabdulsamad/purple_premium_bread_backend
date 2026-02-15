@@ -275,7 +275,7 @@ router.get('/:id', authenticate, async (req, res) => {
     }
 });
 
-// POST /api/riders - Create new rider (FIXED WITH EMAIL DUPLICATE HANDLING)
+// POST /api/riders - Create new rider (FIXED INSERT STATEMENT)
 router.post('/', authenticate, (req, res) => {
     // Configure multer with more permissive settings
     const upload = multer({
@@ -497,7 +497,7 @@ router.post('/', authenticate, (req, res) => {
                 console.log('New customer created with ID:', customerId);
             }
             
-            // Create rider record
+            // Create rider record - FIXED: Now using 34 parameters to match 34 columns
             console.log('Creating rider record...');
             const riderResult = await client.query(
                 `INSERT INTO riders (
@@ -514,38 +514,40 @@ router.post('/', authenticate, (req, res) => {
                         $32, $33, NOW(), NOW())
                 RETURNING id`,
                 [
-                    customerId,
-                    fullname,
-                    phone_number,
-                    email,
-                    address,
-                    date_of_birth,
-                    id_type,
-                    id_number,
-                    idImageUrl,
-                    profileImageUrl,
-                    guarantor1_name,
-                    guarantor1_phone,
-                    guarantor1_address,
-                    guarantor1_relationship,
-                    guarantor1_id_type,
-                    guarantor1_id_number,
-                    guarantor1IdImageUrl,
-                    guarantor2_name,
-                    guarantor2_phone,
-                    guarantor2_address,
-                    guarantor2_relationship,
-                    guarantor2_id_type,
-                    guarantor2_id_number,
-                    guarantor2IdImageUrl,
-                    credit_limit,
-                    0,
-                    payment_terms,
-                    default_payment_method,
-                    notes,
-                    JSON.stringify(parsedProductPrices),
-                    true,
-                    req.user ? req.user.id : null
+                    customerId,                 // $1
+                    fullname,                    // $2
+                    phone_number,                 // $3
+                    email,                        // $4
+                    address,                      // $5
+                    date_of_birth,                 // $6
+                    id_type,                       // $7
+                    id_number,                     // $8
+                    idImageUrl,                    // $9
+                    profileImageUrl,                // $10
+                    guarantor1_name,                // $11
+                    guarantor1_phone,               // $12
+                    guarantor1_address,             // $13
+                    guarantor1_relationship,        // $14
+                    guarantor1_id_type,             // $15
+                    guarantor1_id_number,           // $16
+                    guarantor1IdImageUrl,           // $17
+                    guarantor2_name,                // $18
+                    guarantor2_phone,               // $19
+                    guarantor2_address,             // $20
+                    guarantor2_relationship,        // $21
+                    guarantor2_id_type,             // $22
+                    guarantor2_id_number,           // $23
+                    guarantor2IdImageUrl,           // $24
+                    credit_limit,                   // $25
+                    0,                              // $26 (current_balance - starts at 0)
+                    payment_terms,                  // $27
+                    default_payment_method,         // $28
+                    notes,                          // $29
+                    JSON.stringify(parsedProductPrices), // $30
+                    true,                           // $31 (is_active)
+                    req.user ? req.user.id : null,  // $32 (created_by)
+                    // $33 is NOW() for created_at
+                    // $34 is NOW() for updated_at
                 ]
             );
             
@@ -569,11 +571,18 @@ router.post('/', authenticate, (req, res) => {
             console.error('Error stack:', error.stack);
             
             // Check for duplicate key error
-            if (error.code === '23505' && error.constraint === 'customers_email_key') {
-                return res.status(409).json({ 
-                    error: 'Email already exists',
-                    details: 'This email is already registered. Please use a different email or update the existing customer.'
-                });
+            if (error.code === '23505') {
+                if (error.constraint === 'customers_email_key') {
+                    return res.status(409).json({ 
+                        error: 'Email already exists',
+                        details: 'This email is already registered. Please use a different email or update the existing customer.'
+                    });
+                } else if (error.constraint === 'riders_phone_number_key') {
+                    return res.status(409).json({ 
+                        error: 'Phone number already exists',
+                        details: 'This phone number is already registered to another rider.'
+                    });
+                }
             }
             
             res.status(500).json({ 
@@ -585,7 +594,6 @@ router.post('/', authenticate, (req, res) => {
         }
     });
 });
-
 
 // PUT /api/riders/:id - Update rider
 router.put('/:id', authenticate, (req, res) => {
