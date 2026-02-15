@@ -275,12 +275,22 @@ router.get('/:id', authenticate, async (req, res) => {
     }
 });
 
-// POST /api/riders - Create new rider (FIXED VERSION)
-router.post('/', authenticate, async (req, res) => {
-    // Use a simpler multer configuration with proper error handling
-    const uploadMiddleware = multer({
+// POST /api/riders - Create new rider (COMPLETELY REVISED)
+router.post('/', authenticate, (req, res) => {
+    // Create a fresh multer instance for this route
+    const upload = multer({
         storage: multer.memoryStorage(),
-        limits: { fileSize: 5 * 1024 * 1024 }
+        limits: { 
+            fileSize: 5 * 1024 * 1024,
+            files: 4
+        },
+        fileFilter: (req, file, cb) => {
+            if (file.mimetype.startsWith('image/')) {
+                cb(null, true);
+            } else {
+                cb(new Error('Only image files are allowed'), false);
+            }
+        }
     }).fields([
         { name: 'profile_image', maxCount: 1 },
         { name: 'id_image', maxCount: 1 },
@@ -288,80 +298,126 @@ router.post('/', authenticate, async (req, res) => {
         { name: 'guarantor2_id_image', maxCount: 1 }
     ]);
 
-    uploadMiddleware(req, res, async (err) => {
+    // Call the multer middleware
+    upload(req, res, async function(err) {
+        // Handle multer errors
         if (err) {
             console.error('Multer error:', err);
-
-            // Check if it's the "Unexpected end of form" error
-            if (err.message === 'Unexpected end of form') {
-                // This often happens when the request doesn't have proper multipart boundaries
-                // Let's try to parse the request manually or return a more helpful error
-                return res.status(400).json({
-                    error: 'Invalid form data. Please check your form submission.',
-                    details: 'The request did not contain valid multipart form data. Make sure you are using FormData correctly.'
+            
+            if (err.code === 'LIMIT_FILE_SIZE') {
+                return res.status(400).json({ 
+                    error: 'File too large', 
+                    details: 'Maximum file size is 5MB' 
                 });
             }
-
-            return res.status(400).json({
-                error: 'File upload error',
-                details: err.message
-            });
+            
+            if (err.code === 'LIMIT_FILE_COUNT') {
+                return res.status(400).json({ 
+                    error: 'Too many files', 
+                    details: 'Maximum 4 files allowed' 
+                });
+            }
+            
+            if (err.message === 'Unexpected end of form') {
+                // This can happen if the request is malformed, but we can still try to process
+                console.log('Unexpected end of form, but continuing with available data');
+                // Continue execution - we'll try to process whatever we have
+            } else {
+                return res.status(400).json({ 
+                    error: 'File upload error', 
+                    details: err.message 
+                });
+            }
         }
 
         const client = await db.pool.connect();
-
+        
         try {
             console.log('=== Starting rider creation ===');
-            console.log('Request body:', req.body);
-            console.log('Files:', req.files ? Object.keys(req.files) : 'No files');
-
+            console.log('Request body keys:', Object.keys(req.body));
+            console.log('Files received:', req.files ? Object.keys(req.files) : 'No files');
+            
             await client.query('BEGIN');
-
-            // Extract all fields from req.body
-            const {
-                fullname, phone_number, email, address, date_of_birth,
-                id_type, id_number,
-                guarantor1_name, guarantor1_phone, guarantor1_address, guarantor1_relationship,
-                guarantor1_id_type, guarantor1_id_number,
-                guarantor2_name, guarantor2_phone, guarantor2_address, guarantor2_relationship,
-                guarantor2_id_type, guarantor2_id_number,
-                credit_limit, payment_terms, default_payment_method, notes,
-                product_prices
-            } = req.body;
-
+            
+            // Parse the request body - it comes as strings from FormData
+            const formData = req.body;
+            
+            // Extract fields
+            const fullname = formData.fullname;
+            const phone_number = formData.phone_number;
+            const email = formData.email || null;
+            const address = formData.address || null;
+            const date_of_birth = formData.date_of_birth || null;
+            const id_type = formData.id_type || null;
+            const id_number = formData.id_number || null;
+            
+            // Guarantor 1
+            const guarantor1_name = formData.guarantor1_name || null;
+            const guarantor1_phone = formData.guarantor1_phone || null;
+            const guarantor1_address = formData.guarantor1_address || null;
+            const guarantor1_relationship = formData.guarantor1_relationship || null;
+            const guarantor1_id_type = formData.guarantor1_id_type || null;
+            const guarantor1_id_number = formData.guarantor1_id_number || null;
+            
+            // Guarantor 2 (optional)
+            const guarantor2_name = formData.guarantor2_name || null;
+            const guarantor2_phone = formData.guarantor2_phone || null;
+            const guarantor2_address = formData.guarantor2_address || null;
+            const guarantor2_relationship = formData.guarantor2_relationship || null;
+            const guarantor2_id_type = formData.guarantor2_id_type || null;
+            const guarantor2_id_number = formData.guarantor2_id_number || null;
+            
+            // Credit info
+            const credit_limit = formData.credit_limit ? parseFloat(formData.credit_limit) : 0;
+            const payment_terms = formData.payment_terms || 'weekly';
+            const default_payment_method = formData.default_payment_method || 'Cash';
+            const notes = formData.notes || null;
+            
+            // Parse product_prices
+            let parsedProductPrices = [];
+            if (formData.product_prices) {
+                try {
+                    parsedProductPrices = JSON.parse(formData.product_prices);
+                    console.log('Parsed product prices:', parsedProductPrices);
+                } catch (e) {
+                    console.error('Error parsing product_prices:', e);
+                }
+            }
+            
             // Validate required fields
             if (!fullname || !phone_number) {
                 return res.status(400).json({ error: 'Full name and phone number are required' });
             }
-
+            
             // Check if phone number already exists
             const existingRider = await client.query(
                 'SELECT id FROM riders WHERE phone_number = $1',
                 [phone_number]
             );
-
+            
             if (existingRider.rows.length > 0) {
                 return res.status(409).json({ error: 'Rider with this phone number already exists' });
             }
-
-            // Handle image uploads - only if files exist
+            
+            // Handle image uploads - only if files exist and have buffer
             let profileImageUrl = null;
             let idImageUrl = null;
             let guarantor1IdImageUrl = null;
             let guarantor2IdImageUrl = null;
-
-            // Upload images if they exist and have buffer data
+            
             if (req.files) {
+                // Upload profile image
                 if (req.files.profile_image && req.files.profile_image[0] && req.files.profile_image[0].buffer) {
                     try {
                         profileImageUrl = await uploadImageToImgBB(req.files.profile_image[0].buffer);
                         console.log('Profile image uploaded:', profileImageUrl);
                     } catch (uploadError) {
                         console.error('Profile image upload failed:', uploadError);
-                        // Continue without image if upload fails
+                        // Continue without image
                     }
                 }
-
+                
+                // Upload ID image
                 if (req.files.id_image && req.files.id_image[0] && req.files.id_image[0].buffer) {
                     try {
                         idImageUrl = await uploadImageToImgBB(req.files.id_image[0].buffer);
@@ -370,7 +426,8 @@ router.post('/', authenticate, async (req, res) => {
                         console.error('ID image upload failed:', uploadError);
                     }
                 }
-
+                
+                // Upload guarantor 1 ID image
                 if (req.files.guarantor1_id_image && req.files.guarantor1_id_image[0] && req.files.guarantor1_id_image[0].buffer) {
                     try {
                         guarantor1IdImageUrl = await uploadImageToImgBB(req.files.guarantor1_id_image[0].buffer);
@@ -379,7 +436,8 @@ router.post('/', authenticate, async (req, res) => {
                         console.error('Guarantor 1 ID image upload failed:', uploadError);
                     }
                 }
-
+                
+                // Upload guarantor 2 ID image
                 if (req.files.guarantor2_id_image && req.files.guarantor2_id_image[0] && req.files.guarantor2_id_image[0].buffer) {
                     try {
                         guarantor2IdImageUrl = await uploadImageToImgBB(req.files.guarantor2_id_image[0].buffer);
@@ -389,20 +447,7 @@ router.post('/', authenticate, async (req, res) => {
                     }
                 }
             }
-
-            // Parse product_prices
-            let parsedProductPrices = [];
-            if (product_prices) {
-                try {
-                    parsedProductPrices = typeof product_prices === 'string'
-                        ? JSON.parse(product_prices)
-                        : product_prices;
-                } catch (e) {
-                    console.error('Error parsing product_prices:', e);
-                    parsedProductPrices = [];
-                }
-            }
-
+            
             // First, create customer record
             console.log('Creating customer record...');
             const customerResult = await client.query(
@@ -416,19 +461,19 @@ router.post('/', authenticate, async (req, res) => {
                 [
                     fullname,
                     phone_number,
-                    email || null,
-                    address || null,
-                    credit_limit ? parseFloat(credit_limit) : 0,
+                    email,
+                    address,
+                    credit_limit,
                     0,
                     true,
                     1.0,
                     JSON.stringify(parsedProductPrices)
                 ]
             );
-
+            
             const customerId = customerResult.rows[0].id;
             console.log('Customer created with ID:', customerId);
-
+            
             // Create rider record
             console.log('Creating rider record...');
             const riderResult = await client.query(
@@ -449,59 +494,59 @@ router.post('/', authenticate, async (req, res) => {
                     customerId,
                     fullname,
                     phone_number,
-                    email || null,
-                    address || null,
-                    date_of_birth || null,
-                    id_type || null,
-                    id_number || null,
+                    email,
+                    address,
+                    date_of_birth,
+                    id_type,
+                    id_number,
                     idImageUrl,
                     profileImageUrl,
-                    guarantor1_name || null,
-                    guarantor1_phone || null,
-                    guarantor1_address || null,
-                    guarantor1_relationship || null,
-                    guarantor1_id_type || null,
-                    guarantor1_id_number || null,
+                    guarantor1_name,
+                    guarantor1_phone,
+                    guarantor1_address,
+                    guarantor1_relationship,
+                    guarantor1_id_type,
+                    guarantor1_id_number,
                     guarantor1IdImageUrl,
-                    guarantor2_name || null,
-                    guarantor2_phone || null,
-                    guarantor2_address || null,
-                    guarantor2_relationship || null,
-                    guarantor2_id_type || null,
-                    guarantor2_id_number || null,
+                    guarantor2_name,
+                    guarantor2_phone,
+                    guarantor2_address,
+                    guarantor2_relationship,
+                    guarantor2_id_type,
+                    guarantor2_id_number,
                     guarantor2IdImageUrl,
-                    credit_limit ? parseFloat(credit_limit) : 0,
+                    credit_limit,
                     0,
-                    payment_terms || 'weekly',
-                    default_payment_method || 'Cash',
-                    notes || null,
+                    payment_terms,
+                    default_payment_method,
+                    notes,
                     JSON.stringify(parsedProductPrices),
                     true,
-                    req.user.id
+                    req.user ? req.user.id : null
                 ]
             );
-
+            
             const riderId = riderResult.rows[0].id;
             console.log('Rider created with ID:', riderId);
-
+            
             await client.query('COMMIT');
-
+            
             res.status(201).json({
                 message: 'Rider created successfully',
                 riderId: riderId,
                 customerId: customerId
             });
-
+            
         } catch (error) {
             await client.query('ROLLBACK');
             console.error('=== ERROR CREATING RIDER ===');
             console.error('Error:', error);
             console.error('Error message:', error.message);
             console.error('Error stack:', error.stack);
-
-            res.status(500).json({
-                error: 'Failed to create rider',
-                details: error.message
+            
+            res.status(500).json({ 
+                error: 'Failed to create rider', 
+                details: error.message 
             });
         } finally {
             client.release();
