@@ -34,6 +34,7 @@ const operatingExpensesRoutes = require('./routes/operatingExpenses');
 const salariesRoutes = require('./routes/salaries');
 const staffMembersRoutes = require('./routes/staffs');
 const companyDebtsRoutes = require('./routes/companyDebts');
+const riderRoutes = require('./routes/riders');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -78,6 +79,7 @@ app.use('/api/operating-expenses', operatingExpensesRoutes);
 app.use('/api/salaries', salariesRoutes);
 app.use('/api/staffs', staffMembersRoutes);
 app.use('/api/salaries/company-debts', companyDebtsRoutes);
+app.use('/api/riders', riderRoutes);
 
 // Simple test route
 app.get('/', (req, res) => {

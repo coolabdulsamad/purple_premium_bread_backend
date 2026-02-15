@@ -191,4 +191,131 @@ router.get('/customer/:customerId', async (req, res) => {
     }
 });
 
+// Add to payments.js backend route file
+
+// GET /api/payments/rider/:riderId - Get payment history for a rider
+router.get('/rider/:riderId', authenticate, async (req, res) => {
+    const { riderId } = req.params;
+    
+    try {
+        const query = `
+            SELECT 
+                p.*,
+                st.total_amount as sale_total,
+                st.status as sale_status
+            FROM payments p
+            LEFT JOIN sales_transactions st ON p.transaction_id = st.id
+            WHERE p.rider_id = $1
+            ORDER BY p.payment_date DESC
+        `;
+        
+        const result = await db.query(query, [riderId]);
+        res.status(200).json(result.rows);
+        
+    } catch (error) {
+        console.error('Error fetching rider payments:', error);
+        res.status(500).json({ error: 'Failed to fetch payment history', details: error.message });
+    }
+});
+
+// GET /api/sales/rider/:riderId/outstanding - Get outstanding sales for a rider
+router.get('/rider/:riderId/outstanding', authenticate, async (req, res) => {
+    const { riderId } = req.params;
+    
+    try {
+        const query = `
+            SELECT 
+                id,
+                total_amount,
+                amount_paid,
+                balance_due,
+                sale_date,
+                due_date,
+                status
+            FROM sales_transactions
+            WHERE rider_id = $1 AND balance_due > 0
+            ORDER BY sale_date ASC
+        `;
+        
+        const result = await db.query(query, [riderId]);
+        res.status(200).json(result.rows);
+        
+    } catch (error) {
+        console.error('Error fetching outstanding rider sales:', error);
+        res.status(500).json({ error: 'Failed to fetch outstanding sales', details: error.message });
+    }
+});
+
+// POST /api/payments/rider - Record a payment for a rider
+router.post('/rider', authenticate, async (req, res) => {
+    const {
+        transaction_id,
+        rider_id,
+        amount,
+        payment_method,
+        proof
+    } = req.body;
+    
+    const client = await db.pool.connect();
+    
+    try {
+        await client.query('BEGIN');
+        
+        // Insert payment record
+        const paymentQuery = `
+            INSERT INTO payments (
+                transaction_id, rider_id, amount, payment_method, proof, payment_date
+            )
+            VALUES ($1, $2, $3, $4, $5, NOW())
+            RETURNING *
+        `;
+        
+        const paymentResult = await client.query(paymentQuery, [
+            transaction_id, rider_id, amount, payment_method, proof
+        ]);
+        
+        // Update the sales transaction
+        const updateSaleQuery = `
+            UPDATE sales_transactions
+            SET amount_paid = amount_paid + $1,
+                balance_due = total_amount - (amount_paid + $1),
+                status = CASE 
+                    WHEN total_amount - (amount_paid + $1) <= 0 THEN 'Paid'
+                    WHEN amount_paid + $1 > 0 THEN 'Partially Paid'
+                    ELSE status
+                END,
+                updated_at = NOW()
+            WHERE id = $2
+            RETURNING *
+        `;
+        
+        const saleResult = await client.query(updateSaleQuery, [amount, transaction_id]);
+        
+        // Update rider's current balance
+        const updateRiderQuery = `
+            UPDATE riders
+            SET current_balance = current_balance - $1,
+                updated_at = NOW()
+            WHERE id = $2
+        `;
+        
+        await client.query(updateRiderQuery, [amount, rider_id]);
+        
+        await client.query('COMMIT');
+        
+        res.status(201).json({
+            message: 'Payment recorded successfully',
+            payment: paymentResult.rows[0],
+            updated_sale: saleResult.rows[0]
+        });
+        
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('Error recording rider payment:', error);
+        res.status(500).json({ error: 'Failed to record payment', details: error.message });
+    } finally {
+        client.release();
+    }
+});
+
 module.exports = router;

@@ -76,6 +76,264 @@ router.post('/upload-receipt', async (req, res) => {
 });
 
 // POST /api/sales/process - Process a sale (UPDATED with Customer Balance Update)
+// router.post('/process', async (req, res) => {
+//     const {
+//         cart, subtotal, tax, total, discountAmount,
+//         cashierId, paymentMethod, customerId, note,
+//         paymentReference, paymentImageUrl, status,
+//         amountPaid, balanceDue, dueDate,
+//         freeStock, // The free stock object from the frontend
+//         // NEW: Advantage sale fields
+//         isAdvantageSale, advantageTotal, baseSubtotal
+//     } = req.body;
+
+//     console.log('Advantage Sale Data Received:', {
+//         isAdvantageSale,
+//         advantageTotal,
+//         baseSubtotal,
+//         cartItems: cart.map(item => ({
+//             id: item.id,
+//             price: item.price,
+//             advantageAmount: item.advantageAmount,
+//             finalPrice: item.finalPrice
+//         }))
+//     });
+
+//     const client = await db.pool.connect();
+//     try {
+//         await client.query('BEGIN');
+
+//         // --- STEP 1: Determine Stock Source ---
+//         let stockTable = 'inventory';
+//         let stockCheckQuery = 'SELECT quantity FROM inventory WHERE product_id = $1 FOR UPDATE';
+//         let stockUpdateQuery = `
+//             UPDATE inventory 
+//             SET quantity = quantity - $1, last_updated = NOW() 
+//             WHERE product_id = $2 
+//             RETURNING *;
+//         `;
+
+//         const userResult = await client.query(`
+//             SELECT role, load_from_demo_stock 
+//             FROM users 
+//             WHERE id = $1
+//         `, [cashierId]);
+
+//         const user = userResult.rows[0];
+
+//         if (user && user.role === 'sales' && user.load_from_demo_stock) {
+//             stockTable = 'sales_user_stock';
+
+//             // ✅ FIXED: Directly lock sales_user_stock (no LEFT JOIN)
+//             stockCheckQuery = `
+//                 SELECT quantity 
+//                 FROM sales_user_stock 
+//                 WHERE product_id = $1 AND user_id = $2 
+//                 FOR UPDATE;
+//             `;
+
+//             stockUpdateQuery = `
+//                 UPDATE sales_user_stock 
+//                 SET quantity = quantity - $1, last_updated = NOW() 
+//                 WHERE product_id = $2 AND user_id = $3
+//                 RETURNING *;
+//             `;
+//         }
+
+//         // --- STEP 2: Aggregate All Products (Sold + Free) and Pre-check Stock ---
+//         const productsToUpdate = {};
+//         let totalCogs = 0;
+
+//         // Add sold items
+//         for (const item of cart) {
+//             const productId = item.id;
+//             const quantity = item.quantity;
+//             productsToUpdate[productId] = (productsToUpdate[productId] || 0) + quantity;
+
+//             // Calculate COGS for sold items
+//             const cogsPerUnit = await calculateProductCogs(productId, client);
+//             totalCogs += cogsPerUnit * quantity;
+//         }
+
+//         const totalProfit = total - totalCogs;
+
+//         // Add free items (if applicable)
+//         if (freeStock && freeStock.quantities) {
+//             for (const [productIdStr, freeQty] of Object.entries(freeStock.quantities)) {
+//                 const productId = parseInt(productIdStr);
+//                 if (freeQty > 0) {
+//                     productsToUpdate[productId] = (productsToUpdate[productId] || 0) + freeQty;
+//                 }
+//             }
+//         }
+
+//         // --- STEP 3: Final Stock Check (Locking Safely) ---
+//         for (const [productId, quantityToDeduct] of Object.entries(productsToUpdate)) {
+//             let checkParams = [productId];
+//             if (stockTable === 'sales_user_stock') {
+//                 checkParams.push(cashierId);
+//             }
+
+//             const checkResult = await client.query(stockCheckQuery, checkParams);
+//             const availableStock = checkResult.rows[0]?.quantity || 0;
+
+//             if (quantityToDeduct > availableStock) {
+//                 const product = await client.query('SELECT name FROM products WHERE id = $1', [productId]);
+//                 const productName = product.rows[0]?.name || `Product ID ${productId}`;
+//                 throw new Error(
+//                     `Insufficient stock for ${productName} in ${stockTable}. Needed: ${quantityToDeduct}, Available: ${availableStock}`
+//                 );
+//             }
+//         }
+
+// // --- STEP 4: UPDATE CUSTOMER BALANCE IF CREDIT SALE ---
+// if (customerId && paymentMethod === 'Credit' && balanceDue > 0) {
+//   console.log(`Updating customer ${customerId} balance by ${balanceDue} (remaining amount)`);
+
+//   const updateCustomerBalanceQuery = `
+//     UPDATE customers 
+//     SET balance = balance + $1, updated_at = NOW() 
+//     WHERE id = $2
+//     RETURNING *;
+//   `;
+
+//   const customerUpdateResult = await client.query(updateCustomerBalanceQuery, [balanceDue, customerId]);
+
+//   if (customerUpdateResult.rowCount === 0) {
+//     throw new Error('Customer not found when updating balance');
+//   }
+
+//   console.log('Customer balance updated successfully:', customerUpdateResult.rows[0]);
+// } else if (customerId && paymentMethod === 'Credit' && balanceDue === 0) {
+//   console.log(`Credit sale with full payment - no balance to update for customer ${customerId}`);
+// }
+
+//         // --- STEP 5: Record the Sale ---
+//         const saleInsertQuery = `
+//             INSERT INTO sales_transactions (
+//                 subtotal, tax_amount, total_amount, discount_amount, cashier_id, 
+//                 payment_method, customer_id, note, payment_reference, 
+//                 payment_image_url, status, amount_paid, balance_due, due_date, 
+//                 total_cogs, total_profit, stock_source, stock_source_user_id,
+//                 is_advantage_sale, advantage_total, base_subtotal
+//             )
+//             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 
+//                     $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) 
+//             RETURNING id;
+//         `;
+
+//         // Determine stock source
+//         let stockSource = 'main_inventory';
+//         let stockSourceUserId = null;
+
+//         if (user && user.role === 'sales' && user.load_from_demo_stock) {
+//             stockSource = 'user_stock';
+//             stockSourceUserId = cashierId;
+//         }
+
+//         const saleResult = await client.query(saleInsertQuery, [
+//             subtotal, tax, total, discountAmount, cashierId,
+//             paymentMethod, customerId, note, paymentReference,
+//             paymentImageUrl, status, amountPaid, balanceDue, dueDate,
+//             totalCogs, totalProfit, stockSource, stockSourceUserId,
+//             // NEW: Advantage sale parameters
+//             isAdvantageSale || false,
+//             advantageTotal || 0,
+//             baseSubtotal || subtotal
+//         ]);
+//         const saleId = saleResult.rows[0].id;
+
+//         // --- STEP 6: Record Sale Items ---
+//         const itemsInsertQuery = `
+//             INSERT INTO sales_items (
+//                 sale_id, product_id, quantity, price_at_sale, discount_applied,
+//                 advantage_amount, final_price
+//             )
+//             VALUES ($1, $2, $3, $4, $5, $6, $7);
+//         `;
+
+//         // Get discount percentage
+//         let discountPercent = 0;
+//         if (discountAmount && subtotal > 0) {
+//             discountPercent = (discountAmount / subtotal) * 100;
+//         }
+
+//         for (const item of cart) {
+//             // Extract advantage amount and final price from item data
+//             const advantageAmount = item.advantageAmount || 0;
+//             const finalPrice = item.finalPrice || item.price;
+//             const basePrice = item.price; // Original price
+
+//             await client.query(itemsInsertQuery, [
+//                 saleId,
+//                 item.id,
+//                 item.quantity,
+//                 basePrice, // Original base price
+//                 discountPercent.toFixed(2),
+//                 advantageAmount, // Extra amount added for advantage sale
+//                 finalPrice // Final price charged (base price + advantage amount)
+//             ]);
+//         }
+
+//         // --- STEP 7: Deduct Stock ---
+//         for (const [productId, quantityToDeduct] of Object.entries(productsToUpdate)) {
+//             let updateParams = [quantityToDeduct, productId];
+//             if (stockTable === 'sales_user_stock') {
+//                 updateParams.push(cashierId);
+//             }
+
+//             const updateResult = await client.query(stockUpdateQuery, updateParams);
+
+//             if (updateResult.rowCount === 0 && stockTable === 'sales_user_stock') {
+//                 const insertQuery = `
+//                     INSERT INTO sales_user_stock (user_id, product_id, quantity)
+//                     VALUES ($1, $2, -($3))
+//                     ON CONFLICT (user_id, product_id) DO UPDATE
+//                     SET quantity = sales_user_stock.quantity - EXCLUDED.quantity
+//                     RETURNING *;
+//                 `;
+//                 await client.query(insertQuery, [cashierId, productId, quantityToDeduct]);
+//             }
+//         }
+
+//         // --- STEP 8: Log Free Stock ---
+//         if (freeStock && freeStock.quantities) {
+//             const { quantities, reason } = freeStock;
+//             const logQuery = `
+//                 INSERT INTO free_stock_log (sale_id, product_id, quantity, reason, recorded_by)
+//                 VALUES ($1, $2, $3, $4, $5);
+//             `;
+
+//             for (const [productIdStr, quantity] of Object.entries(quantities)) {
+//                 const productId = parseInt(productIdStr);
+//                 if (quantity > 0) {
+//                     await client.query(logQuery, [saleId, productId, quantity, reason, cashierId]);
+
+//                     if (stockTable !== 'sales_user_stock') {
+//                         await client.query(
+//                             `UPDATE inventory
+//                              SET quantity = quantity - $1, last_updated = NOW()
+//                              WHERE product_id = $2;`,
+//                             [quantity, productId]
+//                         );
+//                     }
+//                 }
+//             }
+//         }
+
+//         await client.query('COMMIT');
+//         res.status(201).json({ message: 'Sale processed successfully', saleId });
+
+//     } catch (error) {
+//         await client.query('ROLLBACK');
+//         console.error('Sale Processing Error:', error.message);
+//         res.status(500).json({ error: 'Failed to process sale.', details: error.message });
+//     } finally {
+//         client.release();
+//     }
+// });
+
+// POST /api/sales/process - Process a sale (UPDATED with Customer Balance Update and Rider Support)
 router.post('/process', async (req, res) => {
     const {
         cart, subtotal, tax, total, discountAmount,
@@ -83,14 +341,18 @@ router.post('/process', async (req, res) => {
         paymentReference, paymentImageUrl, status,
         amountPaid, balanceDue, dueDate,
         freeStock, // The free stock object from the frontend
-        // NEW: Advantage sale fields
-        isAdvantageSale, advantageTotal, baseSubtotal
+        // Advantage sale fields
+        isAdvantageSale, advantageTotal, baseSubtotal,
+        // Rider sale fields - NEW
+        isRiderSale, riderId
     } = req.body;
 
-    console.log('Advantage Sale Data Received:', {
+    console.log('Sale Data Received:', {
         isAdvantageSale,
         advantageTotal,
         baseSubtotal,
+        isRiderSale,
+        riderId,
         cartItems: cart.map(item => ({
             id: item.id,
             price: item.price,
@@ -124,7 +386,6 @@ router.post('/process', async (req, res) => {
         if (user && user.role === 'sales' && user.load_from_demo_stock) {
             stockTable = 'sales_user_stock';
 
-            // ✅ FIXED: Directly lock sales_user_stock (no LEFT JOIN)
             stockCheckQuery = `
                 SELECT quantity 
                 FROM sales_user_stock 
@@ -154,7 +415,7 @@ router.post('/process', async (req, res) => {
             const cogsPerUnit = await calculateProductCogs(productId, client);
             totalCogs += cogsPerUnit * quantity;
         }
-        
+
         const totalProfit = total - totalCogs;
 
         // Add free items (if applicable)
@@ -186,39 +447,99 @@ router.post('/process', async (req, res) => {
             }
         }
 
-// --- STEP 4: UPDATE CUSTOMER BALANCE IF CREDIT SALE ---
-if (customerId && paymentMethod === 'Credit' && balanceDue > 0) {
-  console.log(`Updating customer ${customerId} balance by ${balanceDue} (remaining amount)`);
-  
-  const updateCustomerBalanceQuery = `
-    UPDATE customers 
-    SET balance = balance + $1, updated_at = NOW() 
-    WHERE id = $2
-    RETURNING *;
-  `;
-  
-  const customerUpdateResult = await client.query(updateCustomerBalanceQuery, [balanceDue, customerId]);
-  
-  if (customerUpdateResult.rowCount === 0) {
-    throw new Error('Customer not found when updating balance');
-  }
-  
-  console.log('Customer balance updated successfully:', customerUpdateResult.rows[0]);
-} else if (customerId && paymentMethod === 'Credit' && balanceDue === 0) {
-  console.log(`Credit sale with full payment - no balance to update for customer ${customerId}`);
-}
+        // --- STEP 4: UPDATE CUSTOMER BALANCE IF CREDIT SALE ---
+        if (customerId && paymentMethod === 'Credit' && balanceDue > 0) {
+            console.log(`Updating customer ${customerId} balance by ${balanceDue} (remaining amount)`);
 
-        // --- STEP 5: Record the Sale ---
+            const updateCustomerBalanceQuery = `
+                UPDATE customers 
+                SET balance = balance + $1, updated_at = NOW() 
+                WHERE id = $2
+                RETURNING *;
+            `;
+
+            const customerUpdateResult = await client.query(updateCustomerBalanceQuery, [balanceDue, customerId]);
+
+            if (customerUpdateResult.rowCount === 0) {
+                throw new Error('Customer not found when updating balance');
+            }
+
+            console.log('Customer balance updated successfully:', customerUpdateResult.rows[0]);
+        } else if (customerId && paymentMethod === 'Credit' && balanceDue === 0) {
+            console.log(`Credit sale with full payment - no balance to update for customer ${customerId}`);
+        }
+
+        // --- STEP 5: UPDATE RIDER BALANCE IF RIDER CREDIT SALE ---
+        if (isRiderSale && riderId && paymentMethod === 'Credit' && balanceDue > 0) {
+            console.log(`Updating rider ${riderId} balance by ${balanceDue} (remaining amount)`);
+
+            // First check if rider exists and get current balance
+            const riderCheck = await client.query(
+                'SELECT current_balance, credit_limit FROM riders WHERE id = $1',
+                [riderId]
+            );
+
+            if (riderCheck.rows.length === 0) {
+                throw new Error('Rider not found');
+            }
+
+            const rider = riderCheck.rows[0];
+            const newBalance = parseFloat(rider.current_balance) + parseFloat(balanceDue);
+
+            // Check if new balance would exceed credit limit
+            if (newBalance > parseFloat(rider.credit_limit)) {
+                throw new Error(`This sale would exceed rider's credit limit. Current balance: ₦${rider.current_balance}, Credit limit: ₦${rider.credit_limit}, Additional amount: ₦${balanceDue}`);
+            }
+
+            const updateRiderBalanceQuery = `
+                UPDATE riders 
+                SET current_balance = current_balance + $1, 
+                    updated_at = NOW() 
+                WHERE id = $2
+                RETURNING *;
+            `;
+
+            const riderUpdateResult = await client.query(updateRiderBalanceQuery, [balanceDue, riderId]);
+
+            if (riderUpdateResult.rowCount === 0) {
+                throw new Error('Rider not found when updating balance');
+            }
+
+            console.log('Rider balance updated successfully:', riderUpdateResult.rows[0]);
+
+            // Also update the associated customer balance if rider has a customer_id
+            const riderDetails = await client.query(
+                'SELECT customer_id FROM riders WHERE id = $1',
+                [riderId]
+            );
+
+            if (riderDetails.rows[0]?.customer_id) {
+                const riderCustomerId = riderDetails.rows[0].customer_id;
+                await client.query(
+                    `UPDATE customers 
+                     SET balance = balance + $1, updated_at = NOW() 
+                     WHERE id = $2`,
+                    [balanceDue, riderCustomerId]
+                );
+                console.log(`Associated customer ${riderCustomerId} balance updated`);
+            }
+        } else if (isRiderSale && riderId && paymentMethod === 'Credit' && balanceDue === 0) {
+            console.log(`Rider credit sale with full payment - no balance to update for rider ${riderId}`);
+        }
+
+        // --- STEP 6: Record the Sale ---
         const saleInsertQuery = `
             INSERT INTO sales_transactions (
                 subtotal, tax_amount, total_amount, discount_amount, cashier_id, 
                 payment_method, customer_id, note, payment_reference, 
                 payment_image_url, status, amount_paid, balance_due, due_date, 
                 total_cogs, total_profit, stock_source, stock_source_user_id,
-                is_advantage_sale, advantage_total, base_subtotal
+                is_advantage_sale, advantage_total, base_subtotal,
+                is_rider_sale, rider_id
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 
-                    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) 
+                    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, 
+                    $21, $22, $23) 
             RETURNING id;
         `;
 
@@ -236,14 +557,17 @@ if (customerId && paymentMethod === 'Credit' && balanceDue > 0) {
             paymentMethod, customerId, note, paymentReference,
             paymentImageUrl, status, amountPaid, balanceDue, dueDate,
             totalCogs, totalProfit, stockSource, stockSourceUserId,
-            // NEW: Advantage sale parameters
+            // Advantage sale parameters
             isAdvantageSale || false,
             advantageTotal || 0,
-            baseSubtotal || subtotal
+            baseSubtotal || subtotal,
+            // Rider sale parameters
+            isRiderSale || false,
+            riderId || null
         ]);
         const saleId = saleResult.rows[0].id;
 
-        // --- STEP 6: Record Sale Items ---
+        // --- STEP 7: Record Sale Items ---
         const itemsInsertQuery = `
             INSERT INTO sales_items (
                 sale_id, product_id, quantity, price_at_sale, discount_applied,
@@ -251,7 +575,7 @@ if (customerId && paymentMethod === 'Credit' && balanceDue > 0) {
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7);
         `;
-        
+
         // Get discount percentage
         let discountPercent = 0;
         if (discountAmount && subtotal > 0) {
@@ -263,7 +587,7 @@ if (customerId && paymentMethod === 'Credit' && balanceDue > 0) {
             const advantageAmount = item.advantageAmount || 0;
             const finalPrice = item.finalPrice || item.price;
             const basePrice = item.price; // Original price
-            
+
             await client.query(itemsInsertQuery, [
                 saleId,
                 item.id,
@@ -275,7 +599,7 @@ if (customerId && paymentMethod === 'Credit' && balanceDue > 0) {
             ]);
         }
 
-        // --- STEP 7: Deduct Stock ---
+        // --- STEP 8: Deduct Stock ---
         for (const [productId, quantityToDeduct] of Object.entries(productsToUpdate)) {
             let updateParams = [quantityToDeduct, productId];
             if (stockTable === 'sales_user_stock') {
@@ -296,7 +620,7 @@ if (customerId && paymentMethod === 'Credit' && balanceDue > 0) {
             }
         }
 
-        // --- STEP 8: Log Free Stock ---
+        // --- STEP 9: Log Free Stock ---
         if (freeStock && freeStock.quantities) {
             const { quantities, reason } = freeStock;
             const logQuery = `
@@ -321,8 +645,35 @@ if (customerId && paymentMethod === 'Credit' && balanceDue > 0) {
             }
         }
 
+        // --- STEP 10: If this was a rider sale, log to rider_payment_history if payment was made ---
+        if (isRiderSale && riderId && amountPaid > 0) {
+            const riderPaymentQuery = `
+                INSERT INTO rider_payment_history (
+                    rider_id, payment_id, amount, payment_date, payment_method, notes, recorded_by
+                )
+                VALUES ($1, $2, $3, NOW(), $4, $5, $6)
+            `;
+
+            await client.query(riderPaymentQuery, [
+                riderId,
+                saleId,
+                amountPaid,
+                paymentMethod,
+                `Payment from sale #${saleId}`,
+                cashierId
+            ]);
+
+            console.log(`Rider payment history updated for rider ${riderId}`);
+        }
+
         await client.query('COMMIT');
-        res.status(201).json({ message: 'Sale processed successfully', saleId });
+
+        res.status(201).json({
+            message: 'Sale processed successfully',
+            saleId,
+            isRiderSale,
+            riderId: riderId || null
+        });
 
     } catch (error) {
         await client.query('ROLLBACK');
@@ -336,13 +687,13 @@ if (customerId && paymentMethod === 'Credit' && balanceDue > 0) {
 // GET /api/sales - Get all sales transactions with enhanced filters
 router.get('/', async (req, res) => {
     try {
-        const { 
-            search, startDate, endDate, transactionType, paymentMethod, 
+        const {
+            search, startDate, endDate, transactionType, paymentMethod,
             status, customerId, stockSource, hasFreeStock, discountRange,
             // NEW FILTER PARAMETERS
             saleType, hasReceipt, hasReference, advantageRange
         } = req.query;
-        
+
         let query = `
             SELECT
                 st.*,
@@ -411,7 +762,7 @@ router.get('/', async (req, res) => {
             query += ` AND NOT EXISTS (SELECT 1 FROM free_stock_log fsl WHERE fsl.sale_id = st.id)`;
         }
         if (discountRange) {
-            switch(discountRange) {
+            switch (discountRange) {
                 case 'none':
                     query += ` AND st.discount_amount = 0`;
                     break;
@@ -452,7 +803,7 @@ router.get('/', async (req, res) => {
 
         // Advantage Range Filter
         if (advantageRange) {
-            switch(advantageRange) {
+            switch (advantageRange) {
                 case 'none':
                     query += ` AND (st.is_advantage_sale = false OR st.is_advantage_sale IS NULL OR st.advantage_total = 0 OR st.advantage_total IS NULL)`;
                     break;
@@ -618,7 +969,7 @@ router.post('/b2b', async (req, res) => {
 router.get('/details/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        
+
         const saleQuery = `
             SELECT
                 st.*,
@@ -640,7 +991,7 @@ router.get('/details/:id', async (req, res) => {
             LEFT JOIN users u_stock ON st.stock_source_user_id = u_stock.id
             WHERE st.id = $1;
         `;
-        
+
         const itemsQuery = `
             SELECT 
                 si.*, 
@@ -654,7 +1005,7 @@ router.get('/details/:id', async (req, res) => {
             WHERE si.sale_id = $1
             ORDER BY si.id;
         `;
-        
+
         const freeStockQuery = `
             SELECT 
                 fsl.*, 
