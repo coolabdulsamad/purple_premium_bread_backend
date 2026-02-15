@@ -105,7 +105,7 @@ router.get('/', authenticate, async (req, res) => {
         const params = [];
         let paramIndex = 1;
 
-        // Apply filters
+        // Apply filters (same as before)
         if (searchTerm) {
             query += ` AND (
                 r.fullname ILIKE $${paramIndex} OR 
@@ -186,16 +186,15 @@ router.get('/', authenticate, async (req, res) => {
 
         const result = await db.query(query, params);
 
-        // Get statistics
+        // Get statistics - FIXED: Use COALESCE to handle NULL values properly
         const statsQuery = `
             SELECT 
                 COUNT(*) as total_riders,
-                COUNT(CASE WHEN is_active THEN 1 END) as active_riders,
-                COALESCE(SUM(credit_limit), 0) as total_credit_limit,
-                COALESCE(SUM(current_balance), 0) as total_outstanding,
-                COALESCE(AVG(credit_limit), 0) as avg_credit_limit
+                COUNT(CASE WHEN is_active = true THEN 1 END) as active_riders,
+                COALESCE(SUM(credit_limit), 0)::numeric(10,2) as total_credit_limit,
+                COALESCE(SUM(current_balance), 0)::numeric(10,2) as total_outstanding,
+                COALESCE(AVG(credit_limit), 0)::numeric(10,2) as avg_credit_limit
             FROM riders
-            WHERE 1=1
         `;
         const statsResult = await db.query(statsQuery);
 
@@ -205,7 +204,13 @@ router.get('/', authenticate, async (req, res) => {
             page: parseInt(page),
             limit: parseInt(limit),
             totalPages: Math.ceil(total / parseInt(limit)),
-            stats: statsResult.rows[0]
+            stats: {
+                totalRiders: parseInt(statsResult.rows[0].total_riders) || 0,
+                activeRiders: parseInt(statsResult.rows[0].active_riders) || 0,
+                totalCreditLimit: parseFloat(statsResult.rows[0].total_credit_limit) || 0,
+                totalOutstanding: parseFloat(statsResult.rows[0].total_outstanding) || 0,
+                avgCreditLimit: parseFloat(statsResult.rows[0].avg_credit_limit) || 0
+            }
         });
 
     } catch (error) {
@@ -213,6 +218,7 @@ router.get('/', authenticate, async (req, res) => {
         res.status(500).json({ error: 'Failed to fetch riders', details: error.message });
     }
 });
+
 
 // GET /api/riders/:id - Get single rider details
 router.get('/:id', authenticate, async (req, res) => {
