@@ -275,109 +275,76 @@ router.get('/:id', authenticate, async (req, res) => {
     }
 });
 
-// POST /api/riders - Create new rider (COMPLETELY REVISED)
+// POST /api/riders - Create new rider (SIMPLIFIED VERSION)
 router.post('/', authenticate, (req, res) => {
-    // Create a fresh multer instance for this route
+    // Configure multer with more permissive settings
     const upload = multer({
         storage: multer.memoryStorage(),
-        limits: { 
-            fileSize: 5 * 1024 * 1024,
-            files: 4
-        },
-        fileFilter: (req, file, cb) => {
-            if (file.mimetype.startsWith('image/')) {
-                cb(null, true);
-            } else {
-                cb(new Error('Only image files are allowed'), false);
-            }
-        }
-    }).fields([
-        { name: 'profile_image', maxCount: 1 },
-        { name: 'id_image', maxCount: 1 },
-        { name: 'guarantor1_id_image', maxCount: 1 },
-        { name: 'guarantor2_id_image', maxCount: 1 }
-    ]);
+        limits: { fileSize: 5 * 1024 * 1024 }
+    }).any(); // Use .any() to accept any fields
 
-    // Call the multer middleware
     upload(req, res, async function(err) {
-        // Handle multer errors
         if (err) {
             console.error('Multer error:', err);
-            
-            if (err.code === 'LIMIT_FILE_SIZE') {
-                return res.status(400).json({ 
-                    error: 'File too large', 
-                    details: 'Maximum file size is 5MB' 
-                });
-            }
-            
-            if (err.code === 'LIMIT_FILE_COUNT') {
-                return res.status(400).json({ 
-                    error: 'Too many files', 
-                    details: 'Maximum 4 files allowed' 
-                });
-            }
-            
-            if (err.message === 'Unexpected end of form') {
-                // This can happen if the request is malformed, but we can still try to process
-                console.log('Unexpected end of form, but continuing with available data');
-                // Continue execution - we'll try to process whatever we have
-            } else {
-                return res.status(400).json({ 
-                    error: 'File upload error', 
-                    details: err.message 
-                });
-            }
+            return res.status(400).json({ 
+                error: 'File upload error', 
+                details: err.message 
+            });
         }
 
         const client = await db.pool.connect();
         
         try {
             console.log('=== Starting rider creation ===');
-            console.log('Request body keys:', Object.keys(req.body));
-            console.log('Files received:', req.files ? Object.keys(req.files) : 'No files');
+            console.log('Request body:', req.body);
+            console.log('Files:', req.files ? req.files.length : 0);
+            
+            // Check if we have any data
+            if (Object.keys(req.body).length === 0 && (!req.files || req.files.length === 0)) {
+                return res.status(400).json({ 
+                    error: 'No data received', 
+                    details: 'The request body is empty' 
+                });
+            }
             
             await client.query('BEGIN');
             
-            // Parse the request body - it comes as strings from FormData
-            const formData = req.body;
-            
-            // Extract fields
-            const fullname = formData.fullname;
-            const phone_number = formData.phone_number;
-            const email = formData.email || null;
-            const address = formData.address || null;
-            const date_of_birth = formData.date_of_birth || null;
-            const id_type = formData.id_type || null;
-            const id_number = formData.id_number || null;
+            // Extract fields from req.body
+            const fullname = req.body.fullname;
+            const phone_number = req.body.phone_number;
+            const email = req.body.email || null;
+            const address = req.body.address || null;
+            const date_of_birth = req.body.date_of_birth || null;
+            const id_type = req.body.id_type || null;
+            const id_number = req.body.id_number || null;
             
             // Guarantor 1
-            const guarantor1_name = formData.guarantor1_name || null;
-            const guarantor1_phone = formData.guarantor1_phone || null;
-            const guarantor1_address = formData.guarantor1_address || null;
-            const guarantor1_relationship = formData.guarantor1_relationship || null;
-            const guarantor1_id_type = formData.guarantor1_id_type || null;
-            const guarantor1_id_number = formData.guarantor1_id_number || null;
+            const guarantor1_name = req.body.guarantor1_name || null;
+            const guarantor1_phone = req.body.guarantor1_phone || null;
+            const guarantor1_address = req.body.guarantor1_address || null;
+            const guarantor1_relationship = req.body.guarantor1_relationship || null;
+            const guarantor1_id_type = req.body.guarantor1_id_type || null;
+            const guarantor1_id_number = req.body.guarantor1_id_number || null;
             
             // Guarantor 2 (optional)
-            const guarantor2_name = formData.guarantor2_name || null;
-            const guarantor2_phone = formData.guarantor2_phone || null;
-            const guarantor2_address = formData.guarantor2_address || null;
-            const guarantor2_relationship = formData.guarantor2_relationship || null;
-            const guarantor2_id_type = formData.guarantor2_id_type || null;
-            const guarantor2_id_number = formData.guarantor2_id_number || null;
+            const guarantor2_name = req.body.guarantor2_name || null;
+            const guarantor2_phone = req.body.guarantor2_phone || null;
+            const guarantor2_address = req.body.guarantor2_address || null;
+            const guarantor2_relationship = req.body.guarantor2_relationship || null;
+            const guarantor2_id_type = req.body.guarantor2_id_type || null;
+            const guarantor2_id_number = req.body.guarantor2_id_number || null;
             
             // Credit info
-            const credit_limit = formData.credit_limit ? parseFloat(formData.credit_limit) : 0;
-            const payment_terms = formData.payment_terms || 'weekly';
-            const default_payment_method = formData.default_payment_method || 'Cash';
-            const notes = formData.notes || null;
+            const credit_limit = req.body.credit_limit ? parseFloat(req.body.credit_limit) : 0;
+            const payment_terms = req.body.payment_terms || 'weekly';
+            const default_payment_method = req.body.default_payment_method || 'Cash';
+            const notes = req.body.notes || null;
             
             // Parse product_prices
             let parsedProductPrices = [];
-            if (formData.product_prices) {
+            if (req.body.product_prices) {
                 try {
-                    parsedProductPrices = JSON.parse(formData.product_prices);
+                    parsedProductPrices = JSON.parse(req.body.product_prices);
                     console.log('Parsed product prices:', parsedProductPrices);
                 } catch (e) {
                     console.error('Error parsing product_prices:', e);
@@ -386,7 +353,10 @@ router.post('/', authenticate, (req, res) => {
             
             // Validate required fields
             if (!fullname || !phone_number) {
-                return res.status(400).json({ error: 'Full name and phone number are required' });
+                return res.status(400).json({ 
+                    error: 'Full name and phone number are required',
+                    received: { fullname, phone_number }
+                });
             }
             
             // Check if phone number already exists
@@ -399,28 +369,36 @@ router.post('/', authenticate, (req, res) => {
                 return res.status(409).json({ error: 'Rider with this phone number already exists' });
             }
             
-            // Handle image uploads - only if files exist and have buffer
+            // Handle image uploads
             let profileImageUrl = null;
             let idImageUrl = null;
             let guarantor1IdImageUrl = null;
             let guarantor2IdImageUrl = null;
             
-            if (req.files) {
+            if (req.files && req.files.length > 0) {
+                // Organize files by field name
+                const files = {};
+                req.files.forEach(file => {
+                    if (!files[file.fieldname]) {
+                        files[file.fieldname] = [];
+                    }
+                    files[file.fieldname].push(file);
+                });
+                
                 // Upload profile image
-                if (req.files.profile_image && req.files.profile_image[0] && req.files.profile_image[0].buffer) {
+                if (files.profile_image && files.profile_image[0]) {
                     try {
-                        profileImageUrl = await uploadImageToImgBB(req.files.profile_image[0].buffer);
+                        profileImageUrl = await uploadImageToImgBB(files.profile_image[0].buffer);
                         console.log('Profile image uploaded:', profileImageUrl);
                     } catch (uploadError) {
                         console.error('Profile image upload failed:', uploadError);
-                        // Continue without image
                     }
                 }
                 
                 // Upload ID image
-                if (req.files.id_image && req.files.id_image[0] && req.files.id_image[0].buffer) {
+                if (files.id_image && files.id_image[0]) {
                     try {
-                        idImageUrl = await uploadImageToImgBB(req.files.id_image[0].buffer);
+                        idImageUrl = await uploadImageToImgBB(files.id_image[0].buffer);
                         console.log('ID image uploaded:', idImageUrl);
                     } catch (uploadError) {
                         console.error('ID image upload failed:', uploadError);
@@ -428,9 +406,9 @@ router.post('/', authenticate, (req, res) => {
                 }
                 
                 // Upload guarantor 1 ID image
-                if (req.files.guarantor1_id_image && req.files.guarantor1_id_image[0] && req.files.guarantor1_id_image[0].buffer) {
+                if (files.guarantor1_id_image && files.guarantor1_id_image[0]) {
                     try {
-                        guarantor1IdImageUrl = await uploadImageToImgBB(req.files.guarantor1_id_image[0].buffer);
+                        guarantor1IdImageUrl = await uploadImageToImgBB(files.guarantor1_id_image[0].buffer);
                         console.log('Guarantor 1 ID image uploaded:', guarantor1IdImageUrl);
                     } catch (uploadError) {
                         console.error('Guarantor 1 ID image upload failed:', uploadError);
@@ -438,9 +416,9 @@ router.post('/', authenticate, (req, res) => {
                 }
                 
                 // Upload guarantor 2 ID image
-                if (req.files.guarantor2_id_image && req.files.guarantor2_id_image[0] && req.files.guarantor2_id_image[0].buffer) {
+                if (files.guarantor2_id_image && files.guarantor2_id_image[0]) {
                     try {
-                        guarantor2IdImageUrl = await uploadImageToImgBB(req.files.guarantor2_id_image[0].buffer);
+                        guarantor2IdImageUrl = await uploadImageToImgBB(files.guarantor2_id_image[0].buffer);
                         console.log('Guarantor 2 ID image uploaded:', guarantor2IdImageUrl);
                     } catch (uploadError) {
                         console.error('Guarantor 2 ID image upload failed:', uploadError);
@@ -553,6 +531,7 @@ router.post('/', authenticate, (req, res) => {
         }
     });
 });
+
 
 // PUT /api/riders/:id - Update rider
 router.put('/:id', authenticate, (req, res) => {
