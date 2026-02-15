@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db/db');
 const { jwtDecode } = require('jwt-decode'); // For getting user ID from token
+const authenticate = require('../middleware/authenticate');
 
 // Helper to get user ID from token (if token is sent in headers)
 const getUserIdFromToken = (req) => {
