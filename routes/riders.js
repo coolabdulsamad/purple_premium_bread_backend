@@ -898,4 +898,44 @@ router.get('/export', authenticate, async (req, res) => {
     }
 });
 
+// Add this temporary debug route to riders.js
+router.post('/debug-check', authenticate, async (req, res) => {
+    const client = await db.pool.connect();
+    try {
+        // Check customers table structure
+        const customerColumns = await client.query(`
+            SELECT column_name, data_type 
+            FROM information_schema.columns 
+            WHERE table_name = 'customers'
+            ORDER BY ordinal_position
+        `);
+        
+        // Check riders table structure
+        const riderColumns = await client.query(`
+            SELECT column_name, data_type 
+            FROM information_schema.columns 
+            WHERE table_name = 'riders'
+            ORDER BY ordinal_position
+        `);
+        
+        // Check if there are any triggers or constraints
+        const constraints = await client.query(`
+            SELECT conname, conrelid::regclass AS table_name, pg_get_constraintdef(oid) AS constraint_def
+            FROM pg_constraint
+            WHERE conrelid = 'riders'::regclass OR conrelid = 'customers'::regclass
+        `);
+        
+        res.json({
+            customers: customerColumns.rows,
+            riders: riderColumns.rows,
+            constraints: constraints.rows
+        });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    } finally {
+        client.release();
+    }
+});
+
 module.exports = router;
