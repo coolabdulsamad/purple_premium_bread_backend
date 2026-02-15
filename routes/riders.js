@@ -275,7 +275,7 @@ router.get('/:id', authenticate, async (req, res) => {
     }
 });
 
-// POST /api/riders - Create new rider (SIMPLIFIED VERSION)
+// POST /api/riders - Create new rider (FIXED WITH EMAIL DUPLICATE HANDLING)
 router.post('/', authenticate, (req, res) => {
     // Configure multer with more permissive settings
     const upload = multer({
@@ -359,7 +359,7 @@ router.post('/', authenticate, (req, res) => {
                 });
             }
             
-            // Check if phone number already exists
+            // Check if phone number already exists in riders
             const existingRider = await client.query(
                 'SELECT id FROM riders WHERE phone_number = $1',
                 [phone_number]
@@ -367,6 +367,49 @@ router.post('/', authenticate, (req, res) => {
             
             if (existingRider.rows.length > 0) {
                 return res.status(409).json({ error: 'Rider with this phone number already exists' });
+            }
+            
+            // Check if email already exists in customers (if email is provided)
+            let customerId = null;
+            let existingCustomer = null;
+            
+            if (email) {
+                existingCustomer = await client.query(
+                    'SELECT id, is_rider FROM customers WHERE email = $1',
+                    [email]
+                );
+            }
+            
+            if (existingCustomer && existingCustomer.rows.length > 0) {
+                // Customer with this email already exists
+                const customer = existingCustomer.rows[0];
+                
+                if (customer.is_rider) {
+                    // This email is already associated with a rider
+                    return res.status(409).json({ 
+                        error: 'A rider with this email already exists',
+                        details: 'Please use a different email address'
+                    });
+                } else {
+                    // This is a regular customer, convert them to a rider
+                    console.log('Converting existing customer to rider. Customer ID:', customer.id);
+                    customerId = customer.id;
+                    
+                    // Update the customer to be a rider
+                    await client.query(
+                        `UPDATE customers 
+                         SET is_rider = true, 
+                             credit_limit = $1,
+                             product_prices = $2,
+                             updated_at = NOW()
+                         WHERE id = $3`,
+                        [
+                            credit_limit,
+                            JSON.stringify(parsedProductPrices),
+                            customerId
+                        ]
+                    );
+                }
             }
             
             // Handle image uploads
@@ -426,31 +469,33 @@ router.post('/', authenticate, (req, res) => {
                 }
             }
             
-            // First, create customer record
-            console.log('Creating customer record...');
-            const customerResult = await client.query(
-                `INSERT INTO customers (
-                    fullname, phone, email, address, 
-                    credit_limit, balance, is_rider, 
-                    custom_price_multiplier, product_prices,
-                    created_at, updated_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
-                RETURNING id`,
-                [
-                    fullname,
-                    phone_number,
-                    email,
-                    address,
-                    credit_limit,
-                    0,
-                    true,
-                    1.0,
-                    JSON.stringify(parsedProductPrices)
-                ]
-            );
-            
-            const customerId = customerResult.rows[0].id;
-            console.log('Customer created with ID:', customerId);
+            // If no existing customer was found, create a new one
+            if (!customerId) {
+                console.log('Creating new customer record...');
+                const customerResult = await client.query(
+                    `INSERT INTO customers (
+                        fullname, phone, email, address, 
+                        credit_limit, balance, is_rider, 
+                        custom_price_multiplier, product_prices,
+                        created_at, updated_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+                    RETURNING id`,
+                    [
+                        fullname,
+                        phone_number,
+                        email,
+                        address,
+                        credit_limit,
+                        0,
+                        true,
+                        1.0,
+                        JSON.stringify(parsedProductPrices)
+                    ]
+                );
+                
+                customerId = customerResult.rows[0].id;
+                console.log('New customer created with ID:', customerId);
+            }
             
             // Create rider record
             console.log('Creating rider record...');
@@ -512,7 +557,8 @@ router.post('/', authenticate, (req, res) => {
             res.status(201).json({
                 message: 'Rider created successfully',
                 riderId: riderId,
-                customerId: customerId
+                customerId: customerId,
+                isNewCustomer: !existingCustomer
             });
             
         } catch (error) {
@@ -521,6 +567,14 @@ router.post('/', authenticate, (req, res) => {
             console.error('Error:', error);
             console.error('Error message:', error.message);
             console.error('Error stack:', error.stack);
+            
+            // Check for duplicate key error
+            if (error.code === '23505' && error.constraint === 'customers_email_key') {
+                return res.status(409).json({ 
+                    error: 'Email already exists',
+                    details: 'This email is already registered. Please use a different email or update the existing customer.'
+                });
+            }
             
             res.status(500).json({ 
                 error: 'Failed to create rider', 
