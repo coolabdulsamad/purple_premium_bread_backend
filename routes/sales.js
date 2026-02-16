@@ -713,30 +713,30 @@ router.get('/', async (req, res) => {
         const {
             search, startDate, endDate, transactionType, paymentMethod,
             status, customerId, stockSource, hasFreeStock, discountRange,
-            // NEW FILTER PARAMETERS
-            saleType, hasReceipt, hasReference, advantageRange
+            saleType, hasReceipt, hasReference, advantageRange,
+            isRiderSale, riderId  // Add these new params
         } = req.query;
 
-        // In the GET /api/sales endpoint, update the SELECT query to include rider data
-        const query = `
-    SELECT
-        st.*,
-        c.fullname AS customer_name,
-        u_cashier.fullname AS cashier_name,
-        b.name AS branch_name,
-        r.fullname as rider_name,
-        r.current_balance as rider_balance,
-        CASE 
-            WHEN EXISTS (SELECT 1 FROM free_stock_log fsl WHERE fsl.sale_id = st.id) THEN true
-            ELSE false
-        END as has_free_stock
-    FROM sales_transactions st
-    LEFT JOIN customers c ON st.customer_id = c.id
-    LEFT JOIN users u_cashier ON st.cashier_id = u_cashier.id
-    LEFT JOIN branches b ON st.branch_id = b.id
-    LEFT JOIN riders r ON st.rider_id = r.id
-    WHERE 1 = 1
-`;
+        let query = `
+            SELECT
+                st.*,
+                c.fullname AS customer_name,
+                u_cashier.fullname AS cashier_name,
+                b.name AS branch_name,
+                r.fullname as rider_name,
+                r.current_balance as rider_balance,
+                CASE 
+                    WHEN EXISTS (SELECT 1 FROM free_stock_log fsl WHERE fsl.sale_id = st.id) THEN true
+                    ELSE false
+                END as has_free_stock
+            FROM sales_transactions st
+            LEFT JOIN customers c ON st.customer_id = c.id
+            LEFT JOIN users u_cashier ON st.cashier_id = u_cashier.id
+            LEFT JOIN branches b ON st.branch_id = b.id
+            LEFT JOIN riders r ON st.rider_id = r.id
+            WHERE 1 = 1
+        `;
+
         const params = [];
         let paramCount = 1;
 
@@ -777,7 +777,6 @@ router.get('/', async (req, res) => {
             params.push(customerId);
             paramCount++;
         }
-        // EXISTING FILTERS
         if (stockSource) {
             query += ` AND st.stock_source = $${paramCount}`;
             params.push(stockSource);
@@ -805,30 +804,25 @@ router.get('/', async (req, res) => {
             }
         }
 
-        // NEW FILTERS:
-
-        // Sale Type Filter (Advantage vs Regular)
+        // New filters
         if (saleType === 'advantage') {
             query += ` AND st.is_advantage_sale = true`;
         } else if (saleType === 'regular') {
             query += ` AND (st.is_advantage_sale = false OR st.is_advantage_sale IS NULL)`;
         }
 
-        // Has Receipt Filter
         if (hasReceipt === 'true') {
             query += ` AND st.payment_image_url IS NOT NULL AND st.payment_image_url != ''`;
         } else if (hasReceipt === 'false') {
             query += ` AND (st.payment_image_url IS NULL OR st.payment_image_url = '')`;
         }
 
-        // Has Reference Filter
         if (hasReference === 'true') {
             query += ` AND st.payment_reference IS NOT NULL AND st.payment_reference != ''`;
         } else if (hasReference === 'false') {
             query += ` AND (st.payment_reference IS NULL OR st.payment_reference = '')`;
         }
 
-        // Advantage Range Filter
         if (advantageRange) {
             switch (advantageRange) {
                 case 'none':
@@ -846,17 +840,37 @@ router.get('/', async (req, res) => {
             }
         }
 
-        query += ` ORDER BY st.created_at DESC;`;
+        // Add rider filters
+        if (isRiderSale === 'true') {
+            query += ` AND st.is_rider_sale = true`;
+        } else if (isRiderSale === 'false') {
+            query += ` AND (st.is_rider_sale = false OR st.is_rider_sale IS NULL)`;
+        }
+
+        if (riderId) {
+            query += ` AND st.rider_id = $${paramCount}`;
+            params.push(riderId);
+            paramCount++;
+        }
+
+        query += ` ORDER BY st.created_at DESC`;
 
         const result = await db.pool.query(query, params);
+
+        // Map the results to ensure consistent naming
         const salesWithNames = result.rows.map(sale => ({
             ...sale,
             customer_name: sale.transaction_type === 'B2B' ? sale.branch_name : (sale.customer_name || 'Walk-in Customer')
         }));
+
         res.status(200).json(salesWithNames);
     } catch (error) {
         console.error('Error fetching sales:', error);
-        res.status(500).json({ error: 'Failed to fetch sales.', details: error.message });
+        res.status(500).json({
+            error: 'Failed to fetch sales.',
+            details: error.message,
+            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
     }
 });
 
@@ -1072,14 +1086,44 @@ router.get('/details/:id', async (req, res) => {
 // GET /api/sales/company - Get company details
 router.get('/company', async (req, res) => {
     try {
+        // Check if the table exists first
+        const tableCheck = await db.pool.query(`
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = 'company_details'
+            );
+        `);
+
+        if (!tableCheck.rows[0].exists) {
+            // Return default company details if table doesn't exist
+            return res.status(200).json({
+                name: 'Purple Premium Bread & Pastries',
+                address: '123 Bakery Lane, Lekki, Lagos',
+                phone_number: '+234 801 234 5678',
+                email: 'info@purplebread.com'
+            });
+        }
+
         const result = await db.pool.query('SELECT * FROM company_details LIMIT 1');
         if (result.rowCount === 0) {
-            return res.status(404).json({ error: 'Company details not found.' });
+            // Return default company details if no record exists
+            return res.status(200).json({
+                name: 'Purple Premium Bread & Pastries',
+                address: '123 Bakery Lane, Lekki, Lagos',
+                phone_number: '+234 801 234 5678',
+                email: 'info@purplebread.com'
+            });
         }
         res.status(200).json(result.rows[0]);
     } catch (error) {
         console.error('Error fetching company details:', error);
-        res.status(500).json({ error: 'Failed to fetch company details.', details: error.message });
+        // Return default company details on error
+        res.status(200).json({
+            name: 'Purple Premium Bread & Pastries',
+            address: '123 Bakery Lane, Lekki, Lagos',
+            phone_number: '+234 801 234 5678',
+            email: 'info@purplebread.com'
+        });
     }
 });
 
@@ -1173,7 +1217,7 @@ router.get('/rider/:riderId', async (req, res) => {
 // GET /api/sales/rider/:riderId/outstanding - Get outstanding balance for rider
 router.get('/rider/:riderId/outstanding', async (req, res) => {
     const { riderId } = req.params;
-    
+
     try {
         // Get rider current balance
         const riderQuery = `
@@ -1181,13 +1225,13 @@ router.get('/rider/:riderId/outstanding', async (req, res) => {
             FROM riders 
             WHERE id = $1
         `;
-        
+
         const riderResult = await db.pool.query(riderQuery, [riderId]);
-        
+
         if (riderResult.rows.length === 0) {
             return res.status(404).json({ error: 'Rider not found' });
         }
-        
+
         // Get outstanding sales
         const salesQuery = `
             SELECT 
@@ -1203,12 +1247,12 @@ router.get('/rider/:riderId/outstanding', async (req, res) => {
             WHERE rider_id = $1 AND is_rider_sale = true AND balance_due > 0
             ORDER BY due_date ASC
         `;
-        
+
         const salesResult = await db.pool.query(salesQuery, [riderId]);
-        
+
         // Return as an array of outstanding sales
         res.status(200).json(salesResult.rows);
-        
+
     } catch (error) {
         console.error('Error fetching rider outstanding:', error);
         res.status(500).json({ error: 'Failed to fetch rider outstanding', details: error.message });
