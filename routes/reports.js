@@ -53,13 +53,13 @@ router.get('/profit-loss', async (req, res) => {
         }
 
         const salesResult = await db.query(revenueQuery, revenueParams);
-        const { 
-            total_revenue, 
-            total_cogs, 
-            total_profit, 
+        const {
+            total_revenue,
+            total_cogs,
+            total_profit,
             total_advantage_amount,
             total_advantage_sales,
-            total_regular_sales 
+            total_regular_sales
         } = salesResult.rows[0];
 
         // Total Operating Expenses
@@ -98,7 +98,7 @@ router.get('/profit-loss', async (req, res) => {
         const taxableIncome = Math.max(0, grossProfit - totalExpenses); // Ensure taxable income is not negative
         const taxRate = 0.30; // 30% tax rate
         const taxAmount = taxableIncome * taxRate;
-        
+
         // Calculate net profit after tax
         const netProfitBeforeTax = grossProfit - totalExpenses;
         const netProfit = netProfitBeforeTax - taxAmount;
@@ -208,7 +208,7 @@ router.get('/advantage-sales-analysis', async (req, res) => {
                 AND si.product_id = $${paramIndex++}
             `;
             params.push(parseInt(productId));
-            
+
             // Re-apply date filters
             ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'st.sale_date'));
         }
@@ -227,7 +227,7 @@ router.get('/advantage-sales-analysis', async (req, res) => {
             totalAdvantageAmount: result.rows.reduce((sum, row) => sum + parseFloat(row.advantage_total || 0), 0),
             totalSalesAmount: result.rows.reduce((sum, row) => sum + parseFloat(row.total_amount || 0), 0),
             totalAdvantageProfit: result.rows.reduce((sum, row) => sum + parseFloat(row.advantage_profit || 0), 0),
-            averageAdvantagePerSale: result.rows.length > 0 ? 
+            averageAdvantagePerSale: result.rows.length > 0 ?
                 result.rows.reduce((sum, row) => sum + parseFloat(row.advantage_total || 0), 0) / result.rows.length : 0
         };
 
@@ -252,6 +252,7 @@ router.get('/detailed-sales', async (req, res) => {
         SELECT
             st.id AS sale_id,
             st.sale_date,
+            st.is_rider_sale,
             COALESCE(c.fullname, 'Walk-in Customer') AS customer_name,
             u.fullname AS cashier_name,
             b.name AS branch_name,
@@ -275,6 +276,9 @@ router.get('/detailed-sales', async (req, res) => {
             st.is_advantage_sale,
             st.advantage_total,
             st.base_subtotal,
+            r.fullname AS rider_name,
+            r.phone_number AS rider_phone,
+            r.current_balance AS rider_balance,
             -- Calculate additional metrics
             CASE 
                 WHEN st.is_advantage_sale = true THEN st.total_profit - (st.total_amount - st.advantage_total - st.total_cogs)
@@ -288,6 +292,7 @@ router.get('/detailed-sales', async (req, res) => {
         LEFT JOIN customers c ON st.customer_id = c.id
         LEFT JOIN users u ON st.cashier_id = u.id
         LEFT JOIN branches b ON st.branch_id = b.id
+        LEFT JOIN riders r ON st.rider_id = r.id
         WHERE st.status != 'Cancelled'
     `;
     let params = [];
@@ -579,10 +584,10 @@ router.get('/exchange-requests', async (req, res) => {
 
     try {
         const result = await db.query(query, params);
-        
+
         // Get all product IDs from the exchange requests to fetch product names
         const productIds = new Set();
-        
+
         result.rows.forEach(row => {
             if (row.items_requested_jsonb && Array.isArray(row.items_requested_jsonb)) {
                 row.items_requested_jsonb.forEach(item => {
@@ -611,13 +616,13 @@ router.get('/exchange-requests', async (req, res) => {
         if (productIds.size > 0) {
             const productIdsArray = Array.from(productIds);
             const placeholders = productIdsArray.map((_, index) => `$${index + 1}`).join(',');
-            
+
             const productsQuery = `
                 SELECT id, name 
                 FROM products 
                 WHERE id IN (${placeholders})
             `;
-            
+
             const productsResult = await db.query(productsQuery, productIdsArray);
             productsResult.rows.forEach(product => {
                 productsMap.set(product.id, product.name);
@@ -628,7 +633,7 @@ router.get('/exchange-requests', async (req, res) => {
         const processedData = result.rows.map(row => {
             let itemsDisplay = 'N/A';
             let itemsWithNames = [];
-            
+
             if (row.items_requested_jsonb && Array.isArray(row.items_requested_jsonb)) {
                 itemsWithNames = row.items_requested_jsonb.map(item => {
                     const productName = productsMap.get(item.product_id) || `Product ID: ${item.product_id}`;
@@ -637,11 +642,11 @@ router.get('/exchange-requests', async (req, res) => {
                         product_name: productName
                     };
                 });
-                
-                itemsDisplay = itemsWithNames.map(item => 
+
+                itemsDisplay = itemsWithNames.map(item =>
                     `${item.product_name} (Qty: ${item.quantity || 0})`
                 ).join(', ');
-                
+
             } else if (typeof row.items_requested_jsonb === 'string') {
                 try {
                     const parsedItems = JSON.parse(row.items_requested_jsonb);
@@ -653,8 +658,8 @@ router.get('/exchange-requests', async (req, res) => {
                                 product_name: productName
                             };
                         });
-                        
-                        itemsDisplay = itemsWithNames.map(item => 
+
+                        itemsDisplay = itemsWithNames.map(item =>
                             `${item.product_name} (Qty: ${item.quantity || 0})`
                         ).join(', ');
                     }
@@ -662,7 +667,7 @@ router.get('/exchange-requests', async (req, res) => {
                     itemsDisplay = 'Invalid JSON format';
                 }
             }
-            
+
             return {
                 ...row,
                 items_display: itemsDisplay,
@@ -1023,7 +1028,7 @@ router.get('/inventory-movement', async (req, res) => {
 
     ({ query: productionFilterQuery, params: productionFilterParams, paramIndex: currentParamIndex } =
         applyDateFilters(productionFilterQuery, productionFilterParams, currentParamIndex, startDate, endDate, 'pl.production_date'));
-    
+
     if (productId) {
         productionFilterQuery += ` AND pl.product_id = $${currentParamIndex++}`;
         productionFilterParams.push(parseInt(productId));
@@ -1033,7 +1038,7 @@ router.get('/inventory-movement', async (req, res) => {
         allQueryParts.push(productionFilterQuery);
         allParams = allParams.concat(productionFilterParams);
     }
-    
+
     // --- Sales (OUTFLUX - quantity decreases) ---
     let salesBaseQuery = `
         SELECT
@@ -1068,7 +1073,7 @@ router.get('/inventory-movement', async (req, res) => {
         allQueryParts.push(salesFilterQuery);
         allParams = allParams.concat(salesFilterParams);
     }
-    
+
     let finalQuery = '';
     if (allQueryParts.length > 0) {
         finalQuery = allQueryParts.join(' UNION ALL ');
@@ -1206,6 +1211,248 @@ router.get('/sales-performance-by-staff-branch', async (req, res) => {
         res.status(500).json({ error: 'Failed to generate sales performance report.', details: error.message });
     }
 });
+
+// purple-premium-bread-api/routes/reports.js
+// Add these new endpoints to your existing reports.js file
+
+// NEW: Rider Sales Report
+router.get('/rider-sales', async (req, res) => {
+    const { startDate, endDate, riderId, branchId, paymentMethod, status } = req.query;
+
+    let query = `
+        SELECT
+            st.id AS sale_id,
+            st.sale_date,
+            r.fullname AS rider_name,
+            r.phone_number AS rider_phone,
+            COALESCE(c.fullname, 'Walk-in Customer') AS customer_name,
+            u.fullname AS cashier_name,
+            b.name AS branch_name,
+            st.payment_method,
+            st.status,
+            st.transaction_type,
+            st.subtotal,
+            st.discount_amount,
+            st.tax_amount,
+            st.total_amount,
+            st.total_cogs,
+            st.total_profit,
+            st.is_advantage_sale,
+            st.advantage_total,
+            st.is_rider_sale,
+            st.amount_paid,
+            st.balance_due,
+            st.due_date,
+            st.note
+        FROM sales_transactions st
+        LEFT JOIN riders r ON st.rider_id = r.id
+        LEFT JOIN customers c ON st.customer_id = c.id
+        LEFT JOIN users u ON st.cashier_id = u.id
+        LEFT JOIN branches b ON st.branch_id = b.id
+        WHERE st.is_rider_sale = true
+        AND st.status != 'Cancelled'
+    `;
+    let params = [];
+    let paramIndex = 1;
+
+    // Apply date filters
+    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'st.sale_date'));
+
+    if (riderId) {
+        query += ` AND st.rider_id = $${paramIndex++}`;
+        params.push(parseInt(riderId));
+    }
+    if (branchId) {
+        query += ` AND st.branch_id = $${paramIndex++}`;
+        params.push(parseInt(branchId));
+    }
+    if (paymentMethod) {
+        query += ` AND st.payment_method ILIKE $${paramIndex++}`;
+        params.push(`%${paymentMethod}%`);
+    }
+    if (status) {
+        query += ` AND st.status ILIKE $${paramIndex++}`;
+        params.push(`%${status}%`);
+    }
+
+    query += ` ORDER BY st.sale_date DESC;`;
+
+    try {
+        const result = await db.query(query, params);
+
+        // Calculate summary statistics
+        const summary = {
+            totalSales: result.rows.reduce((sum, row) => sum + parseFloat(row.total_amount || 0), 0),
+            totalProfit: result.rows.reduce((sum, row) => sum + parseFloat(row.total_profit || 0), 0),
+            totalTransactions: result.rows.length,
+            totalCreditSales: result.rows.filter(row => row.status === 'Unpaid' || row.status === 'Partially Paid').length,
+            totalOutstandingBalance: result.rows.reduce((sum, row) => sum + parseFloat(row.balance_due || 0), 0)
+        };
+
+        res.status(200).json({
+            reportTitle: 'Rider Sales Report',
+            filtersUsed: { startDate, endDate, riderId, branchId, paymentMethod, status },
+            summary: summary,
+            reportData: result.rows
+        });
+    } catch (error) {
+        console.error('Error generating rider sales report:', error);
+        res.status(500).json({ error: 'Failed to generate rider sales report.', details: error.message });
+    }
+});
+
+// NEW: Rider Performance Report
+router.get('/rider-performance', async (req, res) => {
+    const { startDate, endDate, limit = 10, sortBy = 'total_sales' } = req.query;
+
+    let query = `
+        SELECT
+            r.id AS rider_id,
+            r.fullname AS rider_name,
+            r.phone_number,
+            r.credit_limit,
+            r.current_balance,
+            r.payment_terms,
+            COUNT(st.id) AS total_transactions,
+            COALESCE(SUM(st.total_amount), 0) AS total_sales,
+            COALESCE(SUM(st.total_profit), 0) AS total_profit,
+            COALESCE(SUM(st.balance_due), 0) AS outstanding_balance,
+            COALESCE(AVG(st.total_amount), 0) AS avg_transaction_value,
+            COUNT(DISTINCT st.customer_id) AS unique_customers,
+            COALESCE(SUM(CASE WHEN st.status IN ('Unpaid', 'Partially Paid') THEN st.balance_due ELSE 0 END), 0) AS total_collectible,
+            MAX(st.sale_date) AS last_sale_date
+        FROM riders r
+        LEFT JOIN sales_transactions st ON r.id = st.rider_id 
+            AND st.is_rider_sale = true 
+            AND st.status != 'Cancelled'
+    `;
+    let params = [];
+    let paramIndex = 1;
+
+    // Apply date filters
+    if (startDate) {
+        query += ` AND st.sale_date >= $${paramIndex++}`;
+        params.push(startDate);
+    }
+    if (endDate) {
+        const endOfDay = new Date(endDate);
+        endOfDay.setDate(endOfDay.getDate() + 1);
+        query += ` AND st.sale_date < $${paramIndex++}`;
+        params.push(endOfDay.toISOString());
+    }
+
+    query += `
+        GROUP BY r.id, r.fullname, r.phone_number, r.credit_limit, r.current_balance, r.payment_terms
+        ORDER BY ${sortBy === 'total_sales' ? 'total_sales' :
+            sortBy === 'outstanding' ? 'outstanding_balance' :
+                sortBy === 'transactions' ? 'total_transactions' : 'total_sales'} DESC
+    `;
+
+    if (limit && limit > 0) {
+        query += ` LIMIT $${paramIndex++}`;
+        params.push(parseInt(limit));
+    }
+
+    try {
+        const result = await db.query(query, params);
+
+        // Calculate overall metrics
+        const overall = {
+            totalRiders: result.rows.length,
+            totalSales: result.rows.reduce((sum, r) => sum + parseFloat(r.total_sales), 0),
+            totalOutstanding: result.rows.reduce((sum, r) => sum + parseFloat(r.outstanding_balance), 0),
+            avgPerRider: result.rows.length > 0 ?
+                result.rows.reduce((sum, r) => sum + parseFloat(r.total_sales), 0) / result.rows.length : 0
+        };
+
+        res.status(200).json({
+            reportTitle: 'Rider Performance Report',
+            filtersUsed: { startDate, endDate, limit, sortBy },
+            overall: overall,
+            reportData: result.rows
+        });
+    } catch (error) {
+        console.error('Error generating rider performance report:', error);
+        res.status(500).json({ error: 'Failed to generate rider performance report.', details: error.message });
+    }
+});
+
+// NEW: Rider Payment History
+router.get('/rider-payments', async (req, res) => {
+    const { startDate, endDate, riderId, paymentMethod } = req.query;
+
+    let query = `
+        SELECT
+            rph.id AS payment_id,
+            r.fullname AS rider_name,
+            rph.payment_date,
+            rph.amount,
+            rph.payment_method,
+            rph.notes,
+            u.fullname AS recorded_by_name,
+            COALESCE(
+                (SELECT COUNT(*) FROM sales_transactions st 
+                 WHERE st.rider_id = r.id AND st.payment_reference = rph.payment_reference),
+                0
+            ) AS transactions_covered
+        FROM rider_payment_history rph
+        JOIN riders r ON rph.rider_id = r.id
+        LEFT JOIN users u ON rph.recorded_by = u.id
+        WHERE 1=1
+    `;
+    let params = [];
+    let paramIndex = 1;
+
+    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'rph.payment_date'));
+
+    if (riderId) {
+        query += ` AND rph.rider_id = $${paramIndex++}`;
+        params.push(parseInt(riderId));
+    }
+    if (paymentMethod) {
+        query += ` AND rph.payment_method ILIKE $${paramIndex++}`;
+        params.push(`%${paymentMethod}%`);
+    }
+
+    query += ` ORDER BY rph.payment_date DESC;`;
+
+    try {
+        const result = await db.query(query, params);
+
+        const summary = {
+            totalPayments: result.rows.length,
+            totalAmount: result.rows.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0),
+            avgPayment: result.rows.length > 0 ?
+                result.rows.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0) / result.rows.length : 0
+        };
+
+        res.status(200).json({
+            reportTitle: 'Rider Payment History',
+            filtersUsed: { startDate, endDate, riderId, paymentMethod },
+            summary: summary,
+            reportData: result.rows
+        });
+    } catch (error) {
+        console.error('Error generating rider payment history:', error);
+        res.status(500).json({ error: 'Failed to generate rider payment history.', details: error.message });
+    }
+});
+
+// UPDATE existing detailed sales report to include rider information
+// Find your existing '/detailed-sales' endpoint and update the SELECT clause to include rider fields:
+
+/*
+In the detailed-sales endpoint, add these fields to the SELECT clause:
+    st.is_rider_sale,
+    r.fullname AS rider_name,
+    r.phone_number AS rider_phone,
+    r.current_balance AS rider_balance,
+*/
+
+// Also update the JOIN:
+/*
+LEFT JOIN riders r ON st.rider_id = r.id
+*/
 
 
 module.exports = router;

@@ -1419,4 +1419,284 @@ router.get('/inventory-value', async (req, res) => {
     }
 });
 
+// purple-premium-bread-api/routes/analysis.js
+// Add these new endpoints to your existing analysis.js file
+
+// GET /api/analysis/rider-sales-trend - Rider sales over time
+router.get('/rider-sales-trend', async (req, res) => {
+    const { startDate, endDate, riderId, period = 'month', limit = 12 } = req.query;
+    
+    let groupBy;
+    if (period === 'month') {
+        groupBy = `TO_CHAR(st.sale_date, 'YYYY-MM')`;
+    } else if (period === 'week') {
+        groupBy = `TO_CHAR(st.sale_date, 'IYYY-IW')`;
+    } else {
+        groupBy = `DATE(st.sale_date)`;
+    }
+
+    let query = `
+        SELECT
+            ${groupBy} AS period_label,
+            r.id AS rider_id,
+            r.fullname AS rider_name,
+            COUNT(DISTINCT st.id) AS total_transactions,
+            COALESCE(SUM(st.total_amount), 0) AS total_sales,
+            COALESCE(SUM(st.total_profit), 0) AS total_profit,
+            COALESCE(SUM(st.balance_due), 0) AS outstanding_balance,
+            COALESCE(AVG(st.total_amount), 0) AS avg_transaction_value,
+            COUNT(DISTINCT st.customer_id) AS unique_customers
+        FROM sales_transactions st
+        JOIN riders r ON st.rider_id = r.id
+        WHERE st.is_rider_sale = true 
+        AND st.status != 'Cancelled'
+    `;
+    let params = [];
+    let paramIndex = 1;
+
+    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'st.sale_date'));
+
+    if (riderId) {
+        query += ` AND st.rider_id = $${paramIndex++}`;
+        params.push(parseInt(riderId));
+    }
+
+    query += `
+        GROUP BY period_label, r.id, r.fullname
+        ORDER BY period_label ASC
+    `;
+
+    if (limit && limit > 0) {
+        query += ` LIMIT $${paramIndex++}`;
+        params.push(parseInt(limit));
+    }
+
+    try {
+        const result = await db.query(query, params);
+        res.status(200).json({
+            filtersUsed: { startDate, endDate, riderId, period, limit },
+            reportData: result.rows,
+            data_note: 'Rider sales trend analysis'
+        });
+    } catch (error) {
+        console.error('Error fetching rider sales trend:', error);
+        res.status(500).json({ error: 'Failed to fetch rider sales trend.', details: error.message });
+    }
+});
+
+// GET /api/analysis/rider-credit-analysis - Analyze rider credit usage
+router.get('/rider-credit-analysis', async (req, res) => {
+    const { startDate, endDate, limit = 10 } = req.query;
+
+    let query = `
+        WITH rider_credit_usage AS (
+            SELECT
+                r.id AS rider_id,
+                r.fullname AS rider_name,
+                r.credit_limit,
+                r.current_balance,
+                r.payment_terms,
+                COUNT(DISTINCT st.id) AS total_transactions,
+                COALESCE(SUM(st.total_amount), 0) AS total_sales,
+                COALESCE(SUM(CASE WHEN st.status IN ('Unpaid', 'Partially Paid') THEN st.balance_due ELSE 0 END), 0) AS total_outstanding,
+                COALESCE(SUM(st.amount_paid), 0) AS total_paid,
+                MAX(st.sale_date) AS last_sale_date,
+                COUNT(DISTINCT CASE WHEN st.balance_due > 0 THEN st.id END) AS overdue_transactions
+            FROM riders r
+            LEFT JOIN sales_transactions st ON r.id = st.rider_id 
+                AND st.is_rider_sale = true 
+                AND st.status != 'Cancelled'
+    `;
+    let params = [];
+    let paramIndex = 1;
+
+    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'st.sale_date'));
+
+    query += `
+            GROUP BY r.id, r.fullname, r.credit_limit, r.current_balance, r.payment_terms
+        )
+        SELECT
+            *,
+            CASE 
+                WHEN credit_limit > 0 THEN (total_outstanding / credit_limit) * 100
+                ELSE 0
+            END AS credit_utilization_percentage,
+            CASE
+                WHEN total_outstanding > credit_limit THEN 'Exceeded'
+                WHEN total_outstanding > credit_limit * 0.8 THEN 'High Usage'
+                WHEN total_outstanding > credit_limit * 0.5 THEN 'Medium Usage'
+                ELSE 'Low Usage'
+            END AS credit_status,
+            credit_limit - current_balance AS available_credit
+        FROM rider_credit_usage
+        ORDER BY total_outstanding DESC
+    `;
+
+    if (limit && limit > 0) {
+        query += ` LIMIT $${paramIndex++}`;
+        params.push(parseInt(limit));
+    }
+
+    try {
+        const result = await db.query(query, params);
+        
+        const summary = {
+            totalRiders: result.rows.length,
+            totalCreditLimit: result.rows.reduce((sum, r) => sum + parseFloat(r.credit_limit || 0), 0),
+            totalOutstanding: result.rows.reduce((sum, r) => sum + parseFloat(r.total_outstanding || 0), 0),
+            totalCurrentBalance: result.rows.reduce((sum, r) => sum + parseFloat(r.current_balance || 0), 0),
+            avgUtilization: result.rows.length > 0 ? 
+                result.rows.reduce((sum, r) => sum + parseFloat(r.credit_utilization_percentage || 0), 0) / result.rows.length : 0,
+            ridersExceeded: result.rows.filter(r => r.credit_status === 'Exceeded').length,
+            ridersHighUsage: result.rows.filter(r => r.credit_status === 'High Usage').length
+        };
+
+        res.status(200).json({
+            filtersUsed: { startDate, endDate, limit },
+            summary: summary,
+            reportData: result.rows,
+            data_note: 'Rider credit usage analysis'
+        });
+    } catch (error) {
+        console.error('Error fetching rider credit analysis:', error);
+        res.status(500).json({ error: 'Failed to fetch rider credit analysis.', details: error.message });
+    }
+});
+
+// GET /api/analysis/rider-product-performance - Which products riders sell most
+router.get('/rider-product-performance', async (req, res) => {
+    const { startDate, endDate, riderId, limit = 10 } = req.query;
+
+    let query = `
+        SELECT
+            p.id AS product_id,
+            p.name AS product_name,
+            p.category,
+            COUNT(DISTINCT st.id) AS total_transactions,
+            COALESCE(SUM(si.quantity), 0) AS total_quantity_sold,
+            COALESCE(SUM(si.quantity * si.price_at_sale), 0) AS total_sales_amount,
+            COALESCE(SUM(si.quantity * si.cost_at_sale), 0) AS total_cogs,
+            COALESCE(SUM(si.quantity * si.price_at_sale) - SUM(si.quantity * si.cost_at_sale), 0) AS total_profit,
+            CASE 
+                WHEN COALESCE(SUM(si.quantity * si.price_at_sale), 0) > 0 
+                THEN ((COALESCE(SUM(si.quantity * si.price_at_sale) - SUM(si.quantity * si.cost_at_sale)) / SUM(si.quantity * si.price_at_sale)) * 100)
+                ELSE 0 
+            END AS profit_margin_percentage,
+            COALESCE(AVG(si.price_at_sale), 0) AS avg_selling_price
+        FROM sales_transactions st
+        JOIN sales_items si ON st.id = si.sale_id
+        JOIN products p ON si.product_id = p.id
+        WHERE st.is_rider_sale = true 
+        AND st.status != 'Cancelled'
+    `;
+    let params = [];
+    let paramIndex = 1;
+
+    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'st.sale_date'));
+
+    if (riderId) {
+        query += ` AND st.rider_id = $${paramIndex++}`;
+        params.push(parseInt(riderId));
+    }
+
+    query += `
+        GROUP BY p.id, p.name, p.category
+        ORDER BY total_sales_amount DESC
+    `;
+
+    if (limit && limit > 0) {
+        query += ` LIMIT $${paramIndex++}`;
+        params.push(parseInt(limit));
+    }
+
+    try {
+        const result = await db.query(query, params);
+        res.status(200).json({
+            filtersUsed: { startDate, endDate, riderId, limit },
+            reportData: result.rows,
+            data_note: 'Products sold by riders analysis'
+        });
+    } catch (error) {
+        console.error('Error fetching rider product performance:', error);
+        res.status(500).json({ error: 'Failed to fetch rider product performance.', details: error.message });
+    }
+});
+
+// GET /api/analysis/rider-collection-efficiency - How well riders collect payments
+router.get('/rider-collection-efficiency', async (req, res) => {
+    const { startDate, endDate, limit = 10 } = req.query;
+
+    let query = `
+        WITH rider_collections AS (
+            SELECT
+                r.id AS rider_id,
+                r.fullname AS rider_name,
+                COUNT(DISTINCT st.id) AS total_transactions,
+                COALESCE(SUM(st.total_amount), 0) AS total_sales_value,
+                COALESCE(SUM(st.amount_paid), 0) AS total_collected,
+                COALESCE(SUM(st.balance_due), 0) AS total_outstanding,
+                COUNT(DISTINCT CASE WHEN st.balance_due > 0 THEN st.id END) AS transactions_with_balance,
+                COUNT(DISTINCT CASE WHEN st.due_date < CURRENT_DATE AND st.balance_due > 0 THEN st.id END) AS overdue_transactions,
+                COALESCE(SUM(CASE WHEN st.due_date < CURRENT_DATE AND st.balance_due > 0 THEN st.balance_due ELSE 0 END), 0) AS overdue_amount
+            FROM riders r
+            LEFT JOIN sales_transactions st ON r.id = st.rider_id 
+                AND st.is_rider_sale = true 
+                AND st.status != 'Cancelled'
+    `;
+    let params = [];
+    let paramIndex = 1;
+
+    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'st.sale_date'));
+
+    query += `
+            GROUP BY r.id, r.fullname
+        )
+        SELECT
+            *,
+            CASE 
+                WHEN total_sales_value > 0 THEN (total_collected / total_sales_value) * 100
+                ELSE 0
+            END AS collection_efficiency_percentage,
+            CASE
+                WHEN transactions_with_balance > 0 THEN (overdue_transactions::DECIMAL / transactions_with_balance) * 100
+                ELSE 0
+            END AS overdue_percentage,
+            CASE
+                WHEN total_outstanding > 0 THEN (overdue_amount / total_outstanding) * 100
+                ELSE 0
+            END AS overdue_amount_percentage
+        FROM rider_collections
+        ORDER BY collection_efficiency_percentage ASC
+    `;
+
+    if (limit && limit > 0) {
+        query += ` LIMIT $${paramIndex++}`;
+        params.push(parseInt(limit));
+    }
+
+    try {
+        const result = await db.query(query, params);
+        
+        const summary = {
+            totalRiders: result.rows.length,
+            totalSalesValue: result.rows.reduce((sum, r) => sum + parseFloat(r.total_sales_value || 0), 0),
+            totalCollected: result.rows.reduce((sum, r) => sum + parseFloat(r.total_collected || 0), 0),
+            totalOutstanding: result.rows.reduce((sum, r) => sum + parseFloat(r.total_outstanding || 0), 0),
+            overallEfficiency: result.rows.reduce((sum, r) => sum + parseFloat(r.total_sales_value || 0), 0) > 0 ?
+                (result.rows.reduce((sum, r) => sum + parseFloat(r.total_collected || 0), 0) / 
+                 result.rows.reduce((sum, r) => sum + parseFloat(r.total_sales_value || 0), 0)) * 100 : 0
+        };
+
+        res.status(200).json({
+            filtersUsed: { startDate, endDate, limit },
+            summary: summary,
+            reportData: result.rows,
+            data_note: 'Rider collection efficiency analysis'
+        });
+    } catch (error) {
+        console.error('Error fetching rider collection efficiency:', error);
+        res.status(500).json({ error: 'Failed to fetch rider collection efficiency.', details: error.message });
+    }
+});
+
 module.exports = router;
