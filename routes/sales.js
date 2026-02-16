@@ -717,27 +717,31 @@ router.get('/', async (req, res) => {
             saleType, hasReceipt, hasReference, advantageRange
         } = req.query;
 
-        let query = `
-            SELECT
-                st.*,
-                c.fullname AS customer_name,
-                u_cashier.fullname AS cashier_name,
-                b.name AS branch_name,
-                CASE 
-                    WHEN EXISTS (SELECT 1 FROM free_stock_log fsl WHERE fsl.sale_id = st.id) THEN true
-                    ELSE false
-                END as has_free_stock
-            FROM sales_transactions st
-            LEFT JOIN customers c ON st.customer_id = c.id
-            LEFT JOIN users u_cashier ON st.cashier_id = u_cashier.id
-            LEFT JOIN branches b ON st.branch_id = b.id
-            WHERE 1 = 1
-        `;
+        // In the GET /api/sales endpoint, update the SELECT query to include rider data
+        const query = `
+    SELECT
+        st.*,
+        c.fullname AS customer_name,
+        u_cashier.fullname AS cashier_name,
+        b.name AS branch_name,
+        r.fullname as rider_name,
+        r.current_balance as rider_balance,
+        CASE 
+            WHEN EXISTS (SELECT 1 FROM free_stock_log fsl WHERE fsl.sale_id = st.id) THEN true
+            ELSE false
+        END as has_free_stock
+    FROM sales_transactions st
+    LEFT JOIN customers c ON st.customer_id = c.id
+    LEFT JOIN users u_cashier ON st.cashier_id = u_cashier.id
+    LEFT JOIN branches b ON st.branch_id = b.id
+    LEFT JOIN riders r ON st.rider_id = r.id
+    WHERE 1 = 1
+`;
         const params = [];
         let paramCount = 1;
 
         if (search) {
-            query += ` AND (c.fullname ILIKE $${paramCount} OR u_cashier.fullname ILIKE $${paramCount} OR st.note ILIKE $${paramCount} OR b.name ILIKE $${paramCount})`;
+            query += ` AND (c.fullname ILIKE $${paramCount} OR u_cashier.fullname ILIKE $${paramCount} OR st.note ILIKE $${paramCount} OR b.name ILIKE $${paramCount} OR r.fullname ILIKE $${paramCount})`;
             params.push(`%${search}%`);
             paramCount++;
         }
@@ -1082,13 +1086,16 @@ router.get('/company', async (req, res) => {
 // GET /api/sales/rider/:riderId - Get sales for a specific rider
 router.get('/rider/:riderId', async (req, res) => {
     const { riderId } = req.params;
-    
+    const { search, startDate, endDate, paymentMethod, status } = req.query;
+
     try {
-        const query = `
+        let query = `
             SELECT 
                 st.*,
                 c.fullname AS customer_name,
                 u_cashier.fullname AS cashier_name,
+                r.fullname as rider_name,
+                r.current_balance as rider_balance,
                 (
                     SELECT COALESCE(json_agg(
                         json_build_object(
@@ -1098,7 +1105,8 @@ router.get('/rider/:riderId', async (req, res) => {
                             'quantity', si.quantity,
                             'price_at_sale', si.price_at_sale,
                             'advantage_amount', si.advantage_amount,
-                            'final_price', si.final_price
+                            'final_price', si.final_price,
+                            'discount_applied', si.discount_applied
                         )
                     ), '[]'::json)
                     FROM sales_items si
@@ -1108,13 +1116,53 @@ router.get('/rider/:riderId', async (req, res) => {
             FROM sales_transactions st
             LEFT JOIN customers c ON st.customer_id = c.id
             LEFT JOIN users u_cashier ON st.cashier_id = u_cashier.id
+            LEFT JOIN riders r ON st.rider_id = r.id
             WHERE st.rider_id = $1 AND st.is_rider_sale = true
-            ORDER BY st.created_at DESC
         `;
-        
-        const result = await db.pool.query(query, [riderId]);
+
+        const params = [riderId];
+        let paramCount = 2;
+
+        if (search) {
+            query += ` AND (
+                st.note ILIKE $${paramCount} OR 
+                EXISTS (SELECT 1 FROM sales_items si JOIN products p ON si.product_id = p.id WHERE si.sale_id = st.id AND p.name ILIKE $${paramCount})
+            )`;
+            params.push(`%${search}%`);
+            paramCount++;
+        }
+
+        if (startDate) {
+            query += ` AND st.created_at >= $${paramCount}`;
+            params.push(startDate);
+            paramCount++;
+        }
+
+        if (endDate) {
+            const endOfDay = new Date(endDate);
+            endOfDay.setDate(endOfDay.getDate() + 1);
+            query += ` AND st.created_at < $${paramCount}`;
+            params.push(endOfDay.toISOString());
+            paramCount++;
+        }
+
+        if (paymentMethod) {
+            query += ` AND st.payment_method = $${paramCount}`;
+            params.push(paymentMethod);
+            paramCount++;
+        }
+
+        if (status) {
+            query += ` AND st.status = $${paramCount}`;
+            params.push(status);
+            paramCount++;
+        }
+
+        query += ` ORDER BY st.created_at DESC`;
+
+        const result = await db.pool.query(query, params);
         res.status(200).json(result.rows);
-        
+
     } catch (error) {
         console.error('Error fetching rider sales:', error);
         res.status(500).json({ error: 'Failed to fetch rider sales', details: error.message });
@@ -1124,7 +1172,7 @@ router.get('/rider/:riderId', async (req, res) => {
 // GET /api/sales/rider/:riderId/outstanding - Get outstanding balance for rider
 router.get('/rider/:riderId/outstanding', async (req, res) => {
     const { riderId } = req.params;
-    
+
     try {
         // Get rider current balance
         const riderQuery = `
@@ -1132,13 +1180,13 @@ router.get('/rider/:riderId/outstanding', async (req, res) => {
             FROM riders 
             WHERE id = $1
         `;
-        
+
         const riderResult = await db.pool.query(riderQuery, [riderId]);
-        
+
         if (riderResult.rows.length === 0) {
             return res.status(404).json({ error: 'Rider not found' });
         }
-        
+
         // Get outstanding sales
         const salesQuery = `
             SELECT 
@@ -1154,15 +1202,15 @@ router.get('/rider/:riderId/outstanding', async (req, res) => {
             WHERE rider_id = $1 AND is_rider_sale = true AND balance_due > 0
             ORDER BY due_date ASC
         `;
-        
+
         const salesResult = await db.pool.query(salesQuery, [riderId]);
-        
+
         res.status(200).json({
             rider: riderResult.rows[0],
             outstanding_sales: salesResult.rows,
             total_outstanding: riderResult.rows[0].current_balance
         });
-        
+
     } catch (error) {
         console.error('Error fetching rider outstanding:', error);
         res.status(500).json({ error: 'Failed to fetch rider outstanding', details: error.message });
