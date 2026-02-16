@@ -220,7 +220,7 @@ router.get('/', authenticate, async (req, res) => {
 });
 
 
-// GET /api/riders/:id - Get single rider details
+// GET /api/riders/:id - Get single rider details (ENHANCED with more data)
 router.get('/:id', authenticate, async (req, res) => {
     const { id } = req.params;
 
@@ -242,7 +242,8 @@ router.get('/:id', authenticate, async (req, res) => {
                             'sale_date', st.sale_date,
                             'total_amount', st.total_amount,
                             'status', st.status,
-                            'balance_due', st.balance_due
+                            'balance_due', st.balance_due,
+                            'payment_method', st.payment_method
                         ) ORDER BY st.sale_date DESC
                     ), '[]'::json)
                     FROM sales_transactions st
@@ -262,18 +263,31 @@ router.get('/:id', authenticate, async (req, res) => {
                     WHERE p.rider_id = r.id
                     LIMIT 10
                 ) as recent_payments,
-                -- Include default product prices for comparison
                 (
-                    SELECT COALESCE(json_agg(
-                        json_build_object(
-                            'id', p.id,
-                            'name', p.name,
-                            'default_price', p.price
-                        )
-                    ), '[]'::json)
+                    SELECT COALESCE(
+                        json_agg(
+                            json_build_object(
+                                'id', p.id,
+                                'name', p.name,
+                                'default_price', p.price,
+                                'category', p.category
+                            )
+                        ),
+                        '[]'::json
+                    )
                     FROM products p
                     WHERE p.is_active = true
-                ) as all_products
+                ) as all_products,
+                (
+                    SELECT COUNT(*) 
+                    FROM sales_transactions st 
+                    WHERE st.rider_id = r.id
+                ) as total_sales_count,
+                (
+                    SELECT COALESCE(SUM(total_amount), 0)
+                    FROM sales_transactions st 
+                    WHERE st.rider_id = r.id
+                ) as total_sales_amount
             FROM riders r
             LEFT JOIN customers c ON r.customer_id = c.id
             WHERE r.id = $1
@@ -295,10 +309,20 @@ router.get('/:id', authenticate, async (req, res) => {
                 return {
                     ...pp,
                     default_price: defaultProduct ? defaultProduct.default_price : 0,
-                    product_name: pp.product_name || (defaultProduct ? defaultProduct.name : 'Unknown Product')
+                    product_name: pp.product_name || (defaultProduct ? defaultProduct.name : 'Unknown Product'),
+                    product_category: defaultProduct ? defaultProduct.category : null
                 };
             });
         }
+
+        // Calculate statistics
+        riderData.stats = {
+            total_sales: riderData.total_sales_count || 0,
+            total_sales_amount: parseFloat(riderData.total_sales_amount) || 0,
+            credit_utilization: riderData.credit_limit > 0
+                ? ((riderData.current_balance / riderData.credit_limit) * 100).toFixed(2)
+                : 0
+        };
 
         res.status(200).json(riderData);
 

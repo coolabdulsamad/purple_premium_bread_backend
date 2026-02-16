@@ -647,23 +647,46 @@ router.post('/process', async (req, res) => {
 
         // --- STEP 10: If this was a rider sale, log to rider_payment_history if payment was made ---
         if (isRiderSale && riderId && amountPaid > 0) {
+            // First, create a payment record
+            const paymentQuery = `
+        INSERT INTO payments (
+            transaction_id, customer_id, amount, payment_date, 
+            payment_method, proof, rider_id, is_rider_payment
+        )
+        VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7)
+        RETURNING id;
+    `;
+
+            const paymentResult = await client.query(paymentQuery, [
+                saleId,
+                customerId || null,
+                amountPaid,
+                paymentMethod,
+                paymentImageUrl || null,
+                riderId,
+                true // is_rider_payment
+            ]);
+
+            const paymentId = paymentResult.rows[0].id;
+
+            // Then log to rider_payment_history with the correct payment_id
             const riderPaymentQuery = `
-                INSERT INTO rider_payment_history (
-                    rider_id, payment_id, amount, payment_date, payment_method, notes, recorded_by
-                )
-                VALUES ($1, $2, $3, NOW(), $4, $5, $6)
-            `;
+        INSERT INTO rider_payment_history (
+            rider_id, payment_id, amount, payment_date, payment_method, notes, recorded_by
+        )
+        VALUES ($1, $2, $3, NOW(), $4, $5, $6)
+    `;
 
             await client.query(riderPaymentQuery, [
                 riderId,
-                saleId,
+                paymentId, // Use payment_id, not saleId
                 amountPaid,
                 paymentMethod,
                 `Payment from sale #${saleId}`,
                 cashierId
             ]);
 
-            console.log(`Rider payment history updated for rider ${riderId}`);
+            console.log(`Rider payment history updated for rider ${riderId} with payment ID ${paymentId}`);
         }
 
         await client.query('COMMIT');
@@ -1053,6 +1076,96 @@ router.get('/company', async (req, res) => {
     } catch (error) {
         console.error('Error fetching company details:', error);
         res.status(500).json({ error: 'Failed to fetch company details.', details: error.message });
+    }
+});
+
+// GET /api/sales/rider/:riderId - Get sales for a specific rider
+router.get('/rider/:riderId', async (req, res) => {
+    const { riderId } = req.params;
+    
+    try {
+        const query = `
+            SELECT 
+                st.*,
+                c.fullname AS customer_name,
+                u_cashier.fullname AS cashier_name,
+                (
+                    SELECT COALESCE(json_agg(
+                        json_build_object(
+                            'id', si.id,
+                            'product_id', si.product_id,
+                            'product_name', p.name,
+                            'quantity', si.quantity,
+                            'price_at_sale', si.price_at_sale,
+                            'advantage_amount', si.advantage_amount,
+                            'final_price', si.final_price
+                        )
+                    ), '[]'::json)
+                    FROM sales_items si
+                    JOIN products p ON si.product_id = p.id
+                    WHERE si.sale_id = st.id
+                ) as items
+            FROM sales_transactions st
+            LEFT JOIN customers c ON st.customer_id = c.id
+            LEFT JOIN users u_cashier ON st.cashier_id = u_cashier.id
+            WHERE st.rider_id = $1 AND st.is_rider_sale = true
+            ORDER BY st.created_at DESC
+        `;
+        
+        const result = await db.pool.query(query, [riderId]);
+        res.status(200).json(result.rows);
+        
+    } catch (error) {
+        console.error('Error fetching rider sales:', error);
+        res.status(500).json({ error: 'Failed to fetch rider sales', details: error.message });
+    }
+});
+
+// GET /api/sales/rider/:riderId/outstanding - Get outstanding balance for rider
+router.get('/rider/:riderId/outstanding', async (req, res) => {
+    const { riderId } = req.params;
+    
+    try {
+        // Get rider current balance
+        const riderQuery = `
+            SELECT current_balance, credit_limit, fullname 
+            FROM riders 
+            WHERE id = $1
+        `;
+        
+        const riderResult = await db.pool.query(riderQuery, [riderId]);
+        
+        if (riderResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Rider not found' });
+        }
+        
+        // Get outstanding sales
+        const salesQuery = `
+            SELECT 
+                id,
+                total_amount,
+                amount_paid,
+                balance_due,
+                sale_date,
+                due_date,
+                status,
+                payment_method
+            FROM sales_transactions
+            WHERE rider_id = $1 AND is_rider_sale = true AND balance_due > 0
+            ORDER BY due_date ASC
+        `;
+        
+        const salesResult = await db.pool.query(salesQuery, [riderId]);
+        
+        res.status(200).json({
+            rider: riderResult.rows[0],
+            outstanding_sales: salesResult.rows,
+            total_outstanding: riderResult.rows[0].current_balance
+        });
+        
+    } catch (error) {
+        console.error('Error fetching rider outstanding:', error);
+        res.status(500).json({ error: 'Failed to fetch rider outstanding', details: error.message });
     }
 });
 
