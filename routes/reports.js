@@ -1377,7 +1377,9 @@ router.get('/rider-performance', async (req, res) => {
     }
 });
 
-// NEW: Rider Payment History
+// In your reports.js file, replace the rider-payments endpoint with this corrected version:
+
+// NEW: Rider Payment History (FIXED - removed payment_reference)
 router.get('/rider-payments', async (req, res) => {
     const { startDate, endDate, riderId, paymentMethod } = req.query;
 
@@ -1390,10 +1392,12 @@ router.get('/rider-payments', async (req, res) => {
             rph.payment_method,
             rph.notes,
             u.fullname AS recorded_by_name,
-            COALESCE(
-                (SELECT COUNT(*) FROM sales_transactions st 
-                 WHERE st.rider_id = r.id AND st.payment_reference = rph.payment_reference),
-                0
+            (
+                SELECT COUNT(*) 
+                FROM sales_transactions st 
+                WHERE st.rider_id = r.id 
+                AND st.payment_method = rph.payment_method
+                AND st.payment_date::date = rph.payment_date::date
             ) AS transactions_covered
         FROM rider_payment_history rph
         JOIN riders r ON rph.rider_id = r.id
@@ -1418,11 +1422,11 @@ router.get('/rider-payments', async (req, res) => {
 
     try {
         const result = await db.query(query, params);
-
+        
         const summary = {
             totalPayments: result.rows.length,
             totalAmount: result.rows.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0),
-            avgPayment: result.rows.length > 0 ?
+            avgPayment: result.rows.length > 0 ? 
                 result.rows.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0) / result.rows.length : 0
         };
 
@@ -1438,21 +1442,94 @@ router.get('/rider-payments', async (req, res) => {
     }
 });
 
-// UPDATE existing detailed sales report to include rider information
-// Find your existing '/detailed-sales' endpoint and update the SELECT clause to include rider fields:
+// NEW: Rider Collection Efficiency Report
+router.get('/rider-collection', async (req, res) => {
+    const { startDate, endDate, riderId } = req.query;
 
-/*
-In the detailed-sales endpoint, add these fields to the SELECT clause:
-    st.is_rider_sale,
-    r.fullname AS rider_name,
-    r.phone_number AS rider_phone,
-    r.current_balance AS rider_balance,
-*/
+    let query = `
+        WITH rider_sales_data AS (
+            SELECT
+                r.id AS rider_id,
+                r.fullname AS rider_name,
+                r.credit_limit,
+                r.current_balance,
+                COUNT(DISTINCT st.id) AS total_transactions,
+                COALESCE(SUM(st.total_amount), 0) AS total_sales,
+                COALESCE(SUM(st.amount_paid), 0) AS total_collected,
+                COALESCE(SUM(st.balance_due), 0) AS total_outstanding,
+                COUNT(DISTINCT CASE WHEN st.balance_due > 0 THEN st.id END) AS unpaid_transactions,
+                COUNT(DISTINCT CASE WHEN st.due_date < CURRENT_DATE AND st.balance_due > 0 THEN st.id END) AS overdue_transactions,
+                COALESCE(SUM(CASE WHEN st.due_date < CURRENT_DATE AND st.balance_due > 0 THEN st.balance_due ELSE 0 END), 0) AS overdue_amount,
+                COALESCE(AVG(st.total_amount), 0) AS avg_transaction_value,
+                MAX(st.sale_date) AS last_sale_date
+            FROM riders r
+            LEFT JOIN sales_transactions st ON r.id = st.rider_id 
+                AND st.is_rider_sale = true 
+                AND st.status != 'Cancelled'
+    `;
+    let params = [];
+    let paramIndex = 1;
 
-// Also update the JOIN:
-/*
-LEFT JOIN riders r ON st.rider_id = r.id
-*/
+    if (startDate) {
+        query += ` AND st.sale_date >= $${paramIndex++}`;
+        params.push(startDate);
+    }
+    if (endDate) {
+        const endOfDay = new Date(endDate);
+        endOfDay.setDate(endOfDay.getDate() + 1);
+        query += ` AND st.sale_date < $${paramIndex++}`;
+        params.push(endOfDay.toISOString());
+    }
+    if (riderId) {
+        query += ` AND r.id = $${paramIndex++}`;
+        params.push(parseInt(riderId));
+    }
 
+    query += `
+            GROUP BY r.id, r.fullname, r.credit_limit, r.current_balance
+        )
+        SELECT
+            *,
+            CASE 
+                WHEN total_sales > 0 THEN (total_collected / total_sales) * 100
+                ELSE 0
+            END AS collection_efficiency,
+            CASE
+                WHEN total_outstanding > 0 THEN (overdue_amount / total_outstanding) * 100
+                ELSE 0
+            END AS overdue_percentage,
+            CASE
+                WHEN credit_limit > 0 THEN (total_outstanding / credit_limit) * 100
+                ELSE 0
+            END AS credit_utilization,
+            credit_limit - current_balance AS available_credit
+        FROM rider_sales_data
+        ORDER BY collection_efficiency ASC
+    `;
+
+    try {
+        const result = await db.query(query, params);
+        
+        const summary = {
+            totalRiders: result.rows.length,
+            totalSales: result.rows.reduce((sum, r) => sum + parseFloat(r.total_sales || 0), 0),
+            totalCollected: result.rows.reduce((sum, r) => sum + parseFloat(r.total_collected || 0), 0),
+            totalOutstanding: result.rows.reduce((sum, r) => sum + parseFloat(r.total_outstanding || 0), 0),
+            totalOverdue: result.rows.reduce((sum, r) => sum + parseFloat(r.overdue_amount || 0), 0),
+            avgCollectionEfficiency: result.rows.length > 0 ?
+                result.rows.reduce((sum, r) => sum + parseFloat(r.collection_efficiency || 0), 0) / result.rows.length : 0
+        };
+
+        res.status(200).json({
+            reportTitle: 'Rider Collection Efficiency Report',
+            filtersUsed: { startDate, endDate, riderId },
+            summary: summary,
+            reportData: result.rows
+        });
+    } catch (error) {
+        console.error('Error generating rider collection efficiency report:', error);
+        res.status(500).json({ error: 'Failed to generate rider collection efficiency report.', details: error.message });
+    }
+});
 
 module.exports = router;
