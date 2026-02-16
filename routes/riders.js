@@ -220,7 +220,7 @@ router.get('/', authenticate, async (req, res) => {
 });
 
 
-// GET /api/riders/:id - Get single rider details (ENHANCED with more data)
+// GET /api/riders/:id - Get single rider details (FIXED with proper sales and payments)
 router.get('/:id', authenticate, async (req, res) => {
     const { id } = req.params;
 
@@ -264,6 +264,16 @@ router.get('/:id', authenticate, async (req, res) => {
                     LIMIT 10
                 ) as recent_payments,
                 (
+                    SELECT COUNT(*) 
+                    FROM sales_transactions st 
+                    WHERE st.rider_id = r.id
+                ) as total_sales_count,
+                (
+                    SELECT COALESCE(SUM(total_amount), 0)
+                    FROM sales_transactions st 
+                    WHERE st.rider_id = r.id
+                ) as total_sales_amount,
+                (
                     SELECT COALESCE(
                         json_agg(
                             json_build_object(
@@ -277,17 +287,7 @@ router.get('/:id', authenticate, async (req, res) => {
                     )
                     FROM products p
                     WHERE p.is_active = true
-                ) as all_products,
-                (
-                    SELECT COUNT(*) 
-                    FROM sales_transactions st 
-                    WHERE st.rider_id = r.id
-                ) as total_sales_count,
-                (
-                    SELECT COALESCE(SUM(total_amount), 0)
-                    FROM sales_transactions st 
-                    WHERE st.rider_id = r.id
-                ) as total_sales_amount
+                ) as all_products
             FROM riders r
             LEFT JOIN customers c ON r.customer_id = c.id
             WHERE r.id = $1
@@ -300,7 +300,11 @@ router.get('/:id', authenticate, async (req, res) => {
         }
 
         const riderData = result.rows[0];
-
+        
+        // Ensure arrays are properly formatted
+        riderData.recent_sales = riderData.recent_sales || [];
+        riderData.recent_payments = riderData.recent_payments || [];
+        
         // Enhance product prices with default values for display
         if (riderData.rider_product_prices && riderData.all_products) {
             const allProducts = riderData.all_products;
@@ -317,10 +321,10 @@ router.get('/:id', authenticate, async (req, res) => {
 
         // Calculate statistics
         riderData.stats = {
-            total_sales: riderData.total_sales_count || 0,
+            total_sales: parseInt(riderData.total_sales_count) || 0,
             total_sales_amount: parseFloat(riderData.total_sales_amount) || 0,
-            credit_utilization: riderData.credit_limit > 0
-                ? ((riderData.current_balance / riderData.credit_limit) * 100).toFixed(2)
+            credit_utilization: riderData.credit_limit > 0 
+                ? ((riderData.current_balance / riderData.credit_limit) * 100).toFixed(2) 
                 : 0
         };
 
