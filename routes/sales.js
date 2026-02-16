@@ -1170,9 +1170,10 @@ router.get('/rider/:riderId', async (req, res) => {
 });
 
 // GET /api/sales/rider/:riderId/outstanding - Get outstanding balance for rider
+// GET /api/sales/rider/:riderId/outstanding - Get outstanding balance for rider
 router.get('/rider/:riderId/outstanding', async (req, res) => {
     const { riderId } = req.params;
-
+    
     try {
         // Get rider current balance
         const riderQuery = `
@@ -1180,13 +1181,13 @@ router.get('/rider/:riderId/outstanding', async (req, res) => {
             FROM riders 
             WHERE id = $1
         `;
-
+        
         const riderResult = await db.pool.query(riderQuery, [riderId]);
-
+        
         if (riderResult.rows.length === 0) {
             return res.status(404).json({ error: 'Rider not found' });
         }
-
+        
         // Get outstanding sales
         const salesQuery = `
             SELECT 
@@ -1202,19 +1203,17 @@ router.get('/rider/:riderId/outstanding', async (req, res) => {
             WHERE rider_id = $1 AND is_rider_sale = true AND balance_due > 0
             ORDER BY due_date ASC
         `;
-
+        
         const salesResult = await db.pool.query(salesQuery, [riderId]);
-
-        res.status(200).json({
-            rider: riderResult.rows[0],
-            outstanding_sales: salesResult.rows,
-            total_outstanding: riderResult.rows[0].current_balance
-        });
-
+        
+        // Return as an array of outstanding sales
+        res.status(200).json(salesResult.rows);
+        
     } catch (error) {
         console.error('Error fetching rider outstanding:', error);
         res.status(500).json({ error: 'Failed to fetch rider outstanding', details: error.message });
     }
 });
+
 
 module.exports = router;
