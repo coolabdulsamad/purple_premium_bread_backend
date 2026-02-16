@@ -261,7 +261,19 @@ router.get('/:id', authenticate, async (req, res) => {
                     FROM payments p
                     WHERE p.rider_id = r.id
                     LIMIT 10
-                ) as recent_payments
+                ) as recent_payments,
+                -- Include default product prices for comparison
+                (
+                    SELECT COALESCE(json_agg(
+                        json_build_object(
+                            'id', p.id,
+                            'name', p.name,
+                            'default_price', p.price
+                        )
+                    ), '[]'::json)
+                    FROM products p
+                    WHERE p.is_active = true
+                ) as all_products
             FROM riders r
             LEFT JOIN customers c ON r.customer_id = c.id
             WHERE r.id = $1
@@ -273,7 +285,22 @@ router.get('/:id', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'Rider not found' });
         }
 
-        res.status(200).json(result.rows[0]);
+        const riderData = result.rows[0];
+
+        // Enhance product prices with default values for display
+        if (riderData.rider_product_prices && riderData.all_products) {
+            const allProducts = riderData.all_products;
+            riderData.rider_product_prices = riderData.rider_product_prices.map(pp => {
+                const defaultProduct = allProducts.find(p => p.id === pp.product_id);
+                return {
+                    ...pp,
+                    default_price: defaultProduct ? defaultProduct.default_price : 0,
+                    product_name: pp.product_name || (defaultProduct ? defaultProduct.name : 'Unknown Product')
+                };
+            });
+        }
+
+        res.status(200).json(riderData);
 
     } catch (error) {
         console.error('Error fetching rider:', error);
@@ -289,32 +316,32 @@ router.post('/', authenticate, (req, res) => {
         limits: { fileSize: 5 * 1024 * 1024 }
     }).any(); // Use .any() to accept any fields
 
-    upload(req, res, async function(err) {
+    upload(req, res, async function (err) {
         if (err) {
             console.error('Multer error:', err);
-            return res.status(400).json({ 
-                error: 'File upload error', 
-                details: err.message 
+            return res.status(400).json({
+                error: 'File upload error',
+                details: err.message
             });
         }
 
         const client = await db.pool.connect();
-        
+
         try {
             console.log('=== Starting rider creation ===');
             console.log('Request body:', req.body);
             console.log('Files:', req.files ? req.files.length : 0);
-            
+
             // Check if we have any data
             if (Object.keys(req.body).length === 0 && (!req.files || req.files.length === 0)) {
-                return res.status(400).json({ 
-                    error: 'No data received', 
-                    details: 'The request body is empty' 
+                return res.status(400).json({
+                    error: 'No data received',
+                    details: 'The request body is empty'
                 });
             }
-            
+
             await client.query('BEGIN');
-            
+
             // Extract fields from req.body
             const fullname = req.body.fullname;
             const phone_number = req.body.phone_number;
@@ -323,7 +350,7 @@ router.post('/', authenticate, (req, res) => {
             const date_of_birth = req.body.date_of_birth || null;
             const id_type = req.body.id_type || null;
             const id_number = req.body.id_number || null;
-            
+
             // Guarantor 1
             const guarantor1_name = req.body.guarantor1_name || null;
             const guarantor1_phone = req.body.guarantor1_phone || null;
@@ -331,7 +358,7 @@ router.post('/', authenticate, (req, res) => {
             const guarantor1_relationship = req.body.guarantor1_relationship || null;
             const guarantor1_id_type = req.body.guarantor1_id_type || null;
             const guarantor1_id_number = req.body.guarantor1_id_number || null;
-            
+
             // Guarantor 2 (optional)
             const guarantor2_name = req.body.guarantor2_name || null;
             const guarantor2_phone = req.body.guarantor2_phone || null;
@@ -339,13 +366,13 @@ router.post('/', authenticate, (req, res) => {
             const guarantor2_relationship = req.body.guarantor2_relationship || null;
             const guarantor2_id_type = req.body.guarantor2_id_type || null;
             const guarantor2_id_number = req.body.guarantor2_id_number || null;
-            
+
             // Credit info
             const credit_limit = req.body.credit_limit ? parseFloat(req.body.credit_limit) : 0;
             const payment_terms = req.body.payment_terms || 'weekly';
             const default_payment_method = req.body.default_payment_method || 'Cash';
             const notes = req.body.notes || null;
-            
+
             // Parse product_prices
             let parsedProductPrices = [];
             if (req.body.product_prices) {
@@ -356,43 +383,43 @@ router.post('/', authenticate, (req, res) => {
                     console.error('Error parsing product_prices:', e);
                 }
             }
-            
+
             // Validate required fields
             if (!fullname || !phone_number) {
-                return res.status(400).json({ 
+                return res.status(400).json({
                     error: 'Full name and phone number are required',
                     received: { fullname, phone_number }
                 });
             }
-            
+
             // Check if phone number already exists in riders
             const existingRider = await client.query(
                 'SELECT id FROM riders WHERE phone_number = $1',
                 [phone_number]
             );
-            
+
             if (existingRider.rows.length > 0) {
                 return res.status(409).json({ error: 'Rider with this phone number already exists' });
             }
-            
+
             // Check if email already exists in customers (if email is provided)
             let customerId = null;
             let existingCustomer = null;
-            
+
             if (email) {
                 existingCustomer = await client.query(
                     'SELECT id, is_rider FROM customers WHERE email = $1',
                     [email]
                 );
             }
-            
+
             if (existingCustomer && existingCustomer.rows.length > 0) {
                 // Customer with this email already exists
                 const customer = existingCustomer.rows[0];
-                
+
                 if (customer.is_rider) {
                     // This email is already associated with a rider
-                    return res.status(409).json({ 
+                    return res.status(409).json({
                         error: 'A rider with this email already exists',
                         details: 'Please use a different email address'
                     });
@@ -400,7 +427,7 @@ router.post('/', authenticate, (req, res) => {
                     // This is a regular customer, convert them to a rider
                     console.log('Converting existing customer to rider. Customer ID:', customer.id);
                     customerId = customer.id;
-                    
+
                     // Update the customer to be a rider
                     await client.query(
                         `UPDATE customers 
@@ -417,13 +444,13 @@ router.post('/', authenticate, (req, res) => {
                     );
                 }
             }
-            
+
             // Handle image uploads
             let profileImageUrl = null;
             let idImageUrl = null;
             let guarantor1IdImageUrl = null;
             let guarantor2IdImageUrl = null;
-            
+
             if (req.files && req.files.length > 0) {
                 // Organize files by field name
                 const files = {};
@@ -433,7 +460,7 @@ router.post('/', authenticate, (req, res) => {
                     }
                     files[file.fieldname].push(file);
                 });
-                
+
                 // Upload profile image
                 if (files.profile_image && files.profile_image[0]) {
                     try {
@@ -443,7 +470,7 @@ router.post('/', authenticate, (req, res) => {
                         console.error('Profile image upload failed:', uploadError);
                     }
                 }
-                
+
                 // Upload ID image
                 if (files.id_image && files.id_image[0]) {
                     try {
@@ -453,7 +480,7 @@ router.post('/', authenticate, (req, res) => {
                         console.error('ID image upload failed:', uploadError);
                     }
                 }
-                
+
                 // Upload guarantor 1 ID image
                 if (files.guarantor1_id_image && files.guarantor1_id_image[0]) {
                     try {
@@ -463,7 +490,7 @@ router.post('/', authenticate, (req, res) => {
                         console.error('Guarantor 1 ID image upload failed:', uploadError);
                     }
                 }
-                
+
                 // Upload guarantor 2 ID image
                 if (files.guarantor2_id_image && files.guarantor2_id_image[0]) {
                     try {
@@ -474,7 +501,7 @@ router.post('/', authenticate, (req, res) => {
                     }
                 }
             }
-            
+
             // If no existing customer was found, create a new one
             if (!customerId) {
                 console.log('Creating new customer record...');
@@ -498,11 +525,11 @@ router.post('/', authenticate, (req, res) => {
                         JSON.stringify(parsedProductPrices)
                     ]
                 );
-                
+
                 customerId = customerResult.rows[0].id;
                 console.log('New customer created with ID:', customerId);
             }
-            
+
             // Create rider record - FIXED: Counted columns from schema.sql
             // According to your schema.sql, the riders table has these columns:
             // Let's list them exactly as they appear in the schema:
@@ -557,44 +584,44 @@ router.post('/', authenticate, (req, res) => {
                     // created_at and updated_at are NOW() in the query
                 ]
             );
-            
+
             const riderId = riderResult.rows[0].id;
             console.log('Rider created with ID:', riderId);
-            
+
             await client.query('COMMIT');
-            
+
             res.status(201).json({
                 message: 'Rider created successfully',
                 riderId: riderId,
                 customerId: customerId,
                 isNewCustomer: !existingCustomer
             });
-            
+
         } catch (error) {
             await client.query('ROLLBACK');
             console.error('=== ERROR CREATING RIDER ===');
             console.error('Error:', error);
             console.error('Error message:', error.message);
             console.error('Error stack:', error.stack);
-            
+
             // Check for duplicate key error
             if (error.code === '23505') {
                 if (error.constraint === 'customers_email_key') {
-                    return res.status(409).json({ 
+                    return res.status(409).json({
                         error: 'Email already exists',
                         details: 'This email is already registered. Please use a different email or update the existing customer.'
                     });
                 } else if (error.constraint === 'riders_phone_number_key') {
-                    return res.status(409).json({ 
+                    return res.status(409).json({
                         error: 'Phone number already exists',
                         details: 'This phone number is already registered to another rider.'
                     });
                 }
             }
-            
-            res.status(500).json({ 
-                error: 'Failed to create rider', 
-                details: error.message 
+
+            res.status(500).json({
+                error: 'Failed to create rider',
+                details: error.message
             });
         } finally {
             client.release();
@@ -602,14 +629,19 @@ router.post('/', authenticate, (req, res) => {
     });
 });
 
-// PUT /api/riders/:id - Update rider
+// PUT /api/riders/:id - Update rider (FIXED IMAGE UPLOAD)
 router.put('/:id', authenticate, (req, res) => {
-    upload.fields([
+    const upload = multer({
+        storage: multer.memoryStorage(),
+        limits: { fileSize: 5 * 1024 * 1024 }
+    }).fields([
         { name: 'profile_image', maxCount: 1 },
         { name: 'id_image', maxCount: 1 },
         { name: 'guarantor1_id_image', maxCount: 1 },
         { name: 'guarantor2_id_image', maxCount: 1 }
-    ])(req, res, async (err) => {
+    ]);
+
+    upload(req, res, async (err) => {
         if (err) {
             console.error('Multer error:', err);
             return res.status(400).json({
@@ -622,22 +654,20 @@ router.put('/:id', authenticate, (req, res) => {
         const client = await db.pool.connect();
 
         try {
+            console.log('=== Starting rider update ===');
+            console.log('Request body:', req.body);
+            console.log('Files:', req.files);
+
             await client.query('BEGIN');
 
-            const {
-                fullname, phone_number, email, address, date_of_birth,
-                id_type, id_number,
-                guarantor1_name, guarantor1_phone, guarantor1_address, guarantor1_relationship,
-                guarantor1_id_type, guarantor1_id_number,
-                guarantor2_name, guarantor2_phone, guarantor2_address, guarantor2_relationship,
-                guarantor2_id_type, guarantor2_id_number,
-                credit_limit, payment_terms, default_payment_method, notes,
-                product_prices, is_active
-            } = req.body;
-
-            // Get current rider info to get customer_id
+            // Get current rider info to get customer_id and existing images
             const currentRider = await client.query(
-                'SELECT customer_id FROM riders WHERE id = $1',
+                `SELECT customer_id, 
+                        profile_image_url, 
+                        id_image_url, 
+                        guarantor1_id_image_url, 
+                        guarantor2_id_image_url 
+                 FROM riders WHERE id = $1`,
                 [id]
             );
 
@@ -646,124 +676,203 @@ router.put('/:id', authenticate, (req, res) => {
             }
 
             const customerId = currentRider.rows[0].customer_id;
+            const existingImages = currentRider.rows[0];
+
+            // Parse images to delete if any
+            let imagesToDelete = [];
+            if (req.body.images_to_delete) {
+                try {
+                    imagesToDelete = JSON.parse(req.body.images_to_delete);
+                    console.log('Images to delete:', imagesToDelete);
+                } catch (e) {
+                    console.error('Error parsing images_to_delete:', e);
+                }
+            }
 
             // Upload new images if provided
-            let profileImageUrl = null;
-            let idImageUrl = null;
-            let guarantor1IdImageUrl = null;
-            let guarantor2IdImageUrl = null;
+            let profileImageUrl = existingImages.profile_image_url;
+            let idImageUrl = existingImages.id_image_url;
+            let guarantor1IdImageUrl = existingImages.guarantor1_id_image_url;
+            let guarantor2IdImageUrl = existingImages.guarantor2_id_image_url;
 
-            if (req.files && req.files.profile_image && req.files.profile_image[0]) {
-                profileImageUrl = await uploadImageToImgBB(req.files.profile_image[0].buffer);
-            }
+            if (req.files) {
+                // Upload profile image
+                if (req.files.profile_image && req.files.profile_image[0]) {
+                    try {
+                        profileImageUrl = await uploadImageToImgBB(req.files.profile_image[0].buffer);
+                        console.log('New profile image uploaded:', profileImageUrl);
+                    } catch (uploadError) {
+                        console.error('Profile image upload failed:', uploadError);
+                    }
+                }
 
-            if (req.files && req.files.id_image && req.files.id_image[0]) {
-                idImageUrl = await uploadImageToImgBB(req.files.id_image[0].buffer);
-            }
+                // Upload ID image
+                if (req.files.id_image && req.files.id_image[0]) {
+                    try {
+                        idImageUrl = await uploadImageToImgBB(req.files.id_image[0].buffer);
+                        console.log('New ID image uploaded:', idImageUrl);
+                    } catch (uploadError) {
+                        console.error('ID image upload failed:', uploadError);
+                    }
+                }
 
-            if (req.files && req.files.guarantor1_id_image && req.files.guarantor1_id_image[0]) {
-                guarantor1IdImageUrl = await uploadImageToImgBB(req.files.guarantor1_id_image[0].buffer);
-            }
+                // Upload guarantor 1 ID image
+                if (req.files.guarantor1_id_image && req.files.guarantor1_id_image[0]) {
+                    try {
+                        guarantor1IdImageUrl = await uploadImageToImgBB(req.files.guarantor1_id_image[0].buffer);
+                        console.log('New guarantor 1 ID image uploaded:', guarantor1IdImageUrl);
+                    } catch (uploadError) {
+                        console.error('Guarantor 1 ID image upload failed:', uploadError);
+                    }
+                }
 
-            if (req.files && req.files.guarantor2_id_image && req.files.guarantor2_id_image[0]) {
-                guarantor2IdImageUrl = await uploadImageToImgBB(req.files.guarantor2_id_image[0].buffer);
+                // Upload guarantor 2 ID image
+                if (req.files.guarantor2_id_image && req.files.guarantor2_id_image[0]) {
+                    try {
+                        guarantor2IdImageUrl = await uploadImageToImgBB(req.files.guarantor2_id_image[0].buffer);
+                        console.log('New guarantor 2 ID image uploaded:', guarantor2IdImageUrl);
+                    } catch (uploadError) {
+                        console.error('Guarantor 2 ID image upload failed:', uploadError);
+                    }
+                }
             }
 
             // Parse product_prices
             let parsedProductPrices = [];
-            if (product_prices) {
-                parsedProductPrices = typeof product_prices === 'string'
-                    ? JSON.parse(product_prices)
-                    : product_prices;
+            if (req.body.product_prices) {
+                try {
+                    parsedProductPrices = typeof req.body.product_prices === 'string'
+                        ? JSON.parse(req.body.product_prices)
+                        : req.body.product_prices;
+                    console.log('Parsed product prices:', parsedProductPrices);
+                } catch (e) {
+                    console.error('Error parsing product_prices:', e);
+                }
             }
 
-            // Update customer record
-            const customerUpdateQuery = `
-                UPDATE customers
-                SET fullname = COALESCE($1, fullname),
-                    phone = COALESCE($2, phone),
+            // Update customer record if needed
+            if (req.body.fullname || req.body.phone_number || req.body.email || req.body.address || req.body.credit_limit) {
+                const customerUpdateQuery = `
+                    UPDATE customers
+                    SET fullname = COALESCE($1, fullname),
+                        phone = COALESCE($2, phone),
+                        email = COALESCE($3, email),
+                        address = COALESCE($4, address),
+                        credit_limit = COALESCE($5, credit_limit),
+                        product_prices = COALESCE($6, product_prices::jsonb),
+                        updated_at = NOW()
+                    WHERE id = $7
+                `;
+
+                await client.query(customerUpdateQuery, [
+                    req.body.fullname || null,
+                    req.body.phone_number || null,
+                    req.body.email || null,
+                    req.body.address || null,
+                    req.body.credit_limit ? parseFloat(req.body.credit_limit) : null,
+                    JSON.stringify(parsedProductPrices),
+                    customerId
+                ]);
+                console.log('Customer updated');
+            }
+
+            // Update rider record
+            const riderUpdateQuery = `
+                UPDATE riders
+                SET 
+                    fullname = COALESCE($1, fullname),
+                    phone_number = COALESCE($2, phone_number),
                     email = COALESCE($3, email),
                     address = COALESCE($4, address),
-                    credit_limit = COALESCE($5, credit_limit),
-                    product_prices = COALESCE($6, product_prices::jsonb),
-                    updated_at = NOW()
-                WHERE id = $7
+                    date_of_birth = COALESCE($5, date_of_birth),
+                    id_type = COALESCE($6, id_type),
+                    id_number = COALESCE($7, id_number),
+                    id_image_url = COALESCE($8, id_image_url),
+                    profile_image_url = COALESCE($9, profile_image_url),
+                    guarantor1_name = COALESCE($10, guarantor1_name),
+                    guarantor1_phone = COALESCE($11, guarantor1_phone),
+                    guarantor1_address = COALESCE($12, guarantor1_address),
+                    guarantor1_relationship = COALESCE($13, guarantor1_relationship),
+                    guarantor1_id_type = COALESCE($14, guarantor1_id_type),
+                    guarantor1_id_number = COALESCE($15, guarantor1_id_number),
+                    guarantor1_id_image_url = COALESCE($16, guarantor1_id_image_url),
+                    guarantor2_name = COALESCE($17, guarantor2_name),
+                    guarantor2_phone = COALESCE($18, guarantor2_phone),
+                    guarantor2_address = COALESCE($19, guarantor2_address),
+                    guarantor2_relationship = COALESCE($20, guarantor2_relationship),
+                    guarantor2_id_type = COALESCE($21, guarantor2_id_type),
+                    guarantor2_id_number = COALESCE($22, guarantor2_id_number),
+                    guarantor2_id_image_url = COALESCE($23, guarantor2_id_image_url),
+                    credit_limit = COALESCE($24, credit_limit),
+                    payment_terms = COALESCE($25, payment_terms),
+                    default_payment_method = COALESCE($26, default_payment_method),
+                    rider_product_prices = COALESCE($27::jsonb, rider_product_prices),
+                    is_active = COALESCE($28, is_active),
+                    notes = COALESCE($29, notes),
+                    updated_at = NOW(),
+                    updated_by = $30
+                WHERE id = $31
+                RETURNING id
             `;
 
-            await client.query(customerUpdateQuery, [
-                fullname || null,
-                phone_number || null,
-                email || null,
-                address || null,
-                credit_limit || null,
-                JSON.stringify(parsedProductPrices),
-                customerId
+            const riderResult = await client.query(riderUpdateQuery, [
+                req.body.fullname || null,                    // $1
+                req.body.phone_number || null,                 // $2
+                req.body.email || null,                        // $3
+                req.body.address || null,                      // $4
+                req.body.date_of_birth || null,                // $5
+                req.body.id_type || null,                      // $6
+                req.body.id_number || null,                    // $7
+                idImageUrl,                                     // $8
+                profileImageUrl,                                // $9
+                req.body.guarantor1_name || null,              // $10
+                req.body.guarantor1_phone || null,             // $11
+                req.body.guarantor1_address || null,           // $12
+                req.body.guarantor1_relationship || null,      // $13
+                req.body.guarantor1_id_type || null,           // $14
+                req.body.guarantor1_id_number || null,         // $15
+                guarantor1IdImageUrl,                           // $16
+                req.body.guarantor2_name || null,              // $17
+                req.body.guarantor2_phone || null,             // $18
+                req.body.guarantor2_address || null,           // $19
+                req.body.guarantor2_relationship || null,      // $20
+                req.body.guarantor2_id_type || null,           // $21
+                req.body.guarantor2_id_number || null,         // $22
+                guarantor2IdImageUrl,                           // $23
+                req.body.credit_limit ? parseFloat(req.body.credit_limit) : null,  // $24
+                req.body.payment_terms || null,                 // $25
+                req.body.default_payment_method || null,        // $26
+                JSON.stringify(parsedProductPrices),           // $27
+                req.body.is_active !== undefined ? req.body.is_active === 'true' : null,  // $28
+                req.body.notes || null,                         // $29
+                req.user ? req.user.id : null,                  // $30 (updated_by)
+                id                                               // $31
             ]);
 
-            // Build rider update query dynamically
-            const riderUpdateFields = [];
-            const riderUpdateValues = [];
-            let valueIndex = 1;
-
-            const updateFields = {
-                fullname, phone_number, email, address, date_of_birth,
-                id_type, id_number,
-                guarantor1_name, guarantor1_phone, guarantor1_address, guarantor1_relationship,
-                guarantor1_id_type, guarantor1_id_number,
-                guarantor2_name, guarantor2_phone, guarantor2_address, guarantor2_relationship,
-                guarantor2_id_type, guarantor2_id_number,
-                credit_limit, payment_terms, default_payment_method, notes,
-                is_active,
-                updated_by: req.user.id
-            };
-
-            // Add rider_product_prices separately as JSONB
-            if (parsedProductPrices.length > 0) {
-                updateFields.rider_product_prices = parsedProductPrices;
+            if (riderResult.rows.length === 0) {
+                throw new Error('Failed to update rider');
             }
 
-            // Add image URLs if new images were uploaded
-            if (profileImageUrl) updateFields.profile_image_url = profileImageUrl;
-            if (idImageUrl) updateFields.id_image_url = idImageUrl;
-            if (guarantor1IdImageUrl) updateFields.guarantor1_id_image_url = guarantor1IdImageUrl;
-            if (guarantor2IdImageUrl) updateFields.guarantor2_id_image_url = guarantor2IdImageUrl;
-
-            Object.entries(updateFields).forEach(([key, value]) => {
-                if (value !== null && value !== undefined && value !== '') {
-                    if (key === 'rider_product_prices') {
-                        riderUpdateFields.push(`${key} = $${valueIndex}::jsonb`);
-                        riderUpdateValues.push(JSON.stringify(value));
-                        valueIndex++;
-                    } else {
-                        riderUpdateFields.push(`${key} = $${valueIndex}`);
-                        riderUpdateValues.push(value);
-                        valueIndex++;
-                    }
-                }
-            });
-
-            // Always update updated_at
-            riderUpdateFields.push(`updated_at = NOW()`);
-
-            if (riderUpdateFields.length > 0) {
-                const riderUpdateQuery = `
-                    UPDATE riders
-                    SET ${riderUpdateFields.join(', ')}
-                    WHERE id = $${valueIndex}
-                `;
-                riderUpdateValues.push(id);
-
-                await client.query(riderUpdateQuery, riderUpdateValues);
-            }
+            console.log('Rider updated successfully with ID:', riderResult.rows[0].id);
 
             await client.query('COMMIT');
 
-            res.status(200).json({ message: 'Rider updated successfully' });
+            res.status(200).json({
+                message: 'Rider updated successfully',
+                riderId: riderResult.rows[0].id
+            });
 
         } catch (error) {
             await client.query('ROLLBACK');
-            console.error('Error updating rider:', error);
-            res.status(500).json({ error: 'Failed to update rider', details: error.message });
+            console.error('=== ERROR UPDATING RIDER ===');
+            console.error('Error:', error);
+            console.error('Error message:', error.message);
+            console.error('Error stack:', error.stack);
+
+            res.status(500).json({
+                error: 'Failed to update rider',
+                details: error.message
+            });
         } finally {
             client.release();
         }
