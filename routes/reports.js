@@ -1377,9 +1377,9 @@ router.get('/rider-performance', async (req, res) => {
     }
 });
 
-// In your reports.js file, replace the rider-payments endpoint with this corrected version:
+// purple-premium-bread-api/routes/reports.js
 
-// NEW: Rider Payment History (FIXED - removed payment_reference)
+// NEW: Rider Payment History (FIXED for your schema)
 router.get('/rider-payments', async (req, res) => {
     const { startDate, endDate, riderId, paymentMethod } = req.query;
 
@@ -1387,18 +1387,20 @@ router.get('/rider-payments', async (req, res) => {
         SELECT
             rph.id AS payment_id,
             r.fullname AS rider_name,
+            r.phone_number AS rider_phone,
             rph.payment_date,
             rph.amount,
             rph.payment_method,
             rph.notes,
             u.fullname AS recorded_by_name,
+            -- Count transactions that might be related to this payment
             (
                 SELECT COUNT(*) 
                 FROM sales_transactions st 
                 WHERE st.rider_id = r.id 
                 AND st.payment_method = rph.payment_method
-                AND st.payment_date::date = rph.payment_date::date
-            ) AS transactions_covered
+                AND DATE(st.sale_date) = DATE(rph.payment_date)
+            ) AS estimated_transactions
         FROM rider_payment_history rph
         JOIN riders r ON rph.rider_id = r.id
         LEFT JOIN users u ON rph.recorded_by = u.id
@@ -1407,7 +1409,17 @@ router.get('/rider-payments', async (req, res) => {
     let params = [];
     let paramIndex = 1;
 
-    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'rph.payment_date'));
+    // Apply date filters
+    if (startDate) {
+        query += ` AND rph.payment_date >= $${paramIndex++}`;
+        params.push(startDate);
+    }
+    if (endDate) {
+        const endOfDay = new Date(endDate);
+        endOfDay.setDate(endOfDay.getDate() + 1);
+        query += ` AND rph.payment_date < $${paramIndex++}`;
+        params.push(endOfDay.toISOString());
+    }
 
     if (riderId) {
         query += ` AND rph.rider_id = $${paramIndex++}`;
@@ -1442,7 +1454,7 @@ router.get('/rider-payments', async (req, res) => {
     }
 });
 
-// NEW: Rider Collection Efficiency Report
+// NEW: Rider Collection Efficiency Report (FIXED for your schema)
 router.get('/rider-collection', async (req, res) => {
     const { startDate, endDate, riderId } = req.query;
 
@@ -1451,6 +1463,7 @@ router.get('/rider-collection', async (req, res) => {
             SELECT
                 r.id AS rider_id,
                 r.fullname AS rider_name,
+                r.phone_number,
                 r.credit_limit,
                 r.current_balance,
                 COUNT(DISTINCT st.id) AS total_transactions,
@@ -1461,7 +1474,8 @@ router.get('/rider-collection', async (req, res) => {
                 COUNT(DISTINCT CASE WHEN st.due_date < CURRENT_DATE AND st.balance_due > 0 THEN st.id END) AS overdue_transactions,
                 COALESCE(SUM(CASE WHEN st.due_date < CURRENT_DATE AND st.balance_due > 0 THEN st.balance_due ELSE 0 END), 0) AS overdue_amount,
                 COALESCE(AVG(st.total_amount), 0) AS avg_transaction_value,
-                MAX(st.sale_date) AS last_sale_date
+                MAX(st.sale_date) AS last_sale_date,
+                COUNT(DISTINCT st.customer_id) AS unique_customers
             FROM riders r
             LEFT JOIN sales_transactions st ON r.id = st.rider_id 
                 AND st.is_rider_sale = true 
@@ -1480,13 +1494,9 @@ router.get('/rider-collection', async (req, res) => {
         query += ` AND st.sale_date < $${paramIndex++}`;
         params.push(endOfDay.toISOString());
     }
-    if (riderId) {
-        query += ` AND r.id = $${paramIndex++}`;
-        params.push(parseInt(riderId));
-    }
 
     query += `
-            GROUP BY r.id, r.fullname, r.credit_limit, r.current_balance
+            GROUP BY r.id, r.fullname, r.phone_number, r.credit_limit, r.current_balance
         )
         SELECT
             *,
@@ -1502,10 +1512,16 @@ router.get('/rider-collection', async (req, res) => {
                 WHEN credit_limit > 0 THEN (total_outstanding / credit_limit) * 100
                 ELSE 0
             END AS credit_utilization,
-            credit_limit - current_balance AS available_credit
+            (credit_limit - current_balance) AS available_credit
         FROM rider_sales_data
-        ORDER BY collection_efficiency ASC
     `;
+
+    if (riderId) {
+        query += ` WHERE rider_id = $${paramIndex++}`;
+        params.push(parseInt(riderId));
+    }
+
+    query += ` ORDER BY collection_efficiency ASC;`;
 
     try {
         const result = await db.query(query, params);
@@ -1529,6 +1545,168 @@ router.get('/rider-collection', async (req, res) => {
     } catch (error) {
         console.error('Error generating rider collection efficiency report:', error);
         res.status(500).json({ error: 'Failed to generate rider collection efficiency report.', details: error.message });
+    }
+});
+
+// UPDATE the detailed-sales endpoint to include rider information
+// Find your existing '/detailed-sales' endpoint and add these fields to the SELECT clause:
+/*
+    st.is_rider_sale,
+    r.fullname AS rider_name,
+    r.phone_number AS rider_phone,
+    r.current_balance AS rider_balance,
+*/
+
+// Also add the JOIN:
+/*
+LEFT JOIN riders r ON st.rider_id = r.id
+*/
+
+// UPDATE the profit-loss endpoint to include rider sales
+// Find your existing '/profit-loss' endpoint and modify the revenue query:
+router.get('/profit-loss', async (req, res) => {
+    const { startDate, endDate, branchId } = req.query;
+
+    try {
+        // Total Revenue from Sales - Updated to include rider sales
+        let revenueQuery = `
+            SELECT 
+                COALESCE(SUM(total_amount), 0) AS total_revenue,
+                COALESCE(SUM(total_cogs), 0) AS total_cogs,
+                COALESCE(SUM(total_profit), 0) AS total_profit,
+                COALESCE(SUM(CASE WHEN is_advantage_sale = true THEN advantage_total ELSE 0 END), 0) AS total_advantage_amount,
+                COALESCE(SUM(CASE WHEN is_advantage_sale = true THEN total_amount ELSE 0 END), 0) AS total_advantage_sales,
+                COALESCE(SUM(CASE WHEN is_advantage_sale = false OR is_advantage_sale IS NULL THEN total_amount ELSE 0 END), 0) AS total_regular_sales,
+                COALESCE(SUM(CASE WHEN is_rider_sale = true THEN total_amount ELSE 0 END), 0) AS total_rider_sales
+            FROM sales_transactions
+            WHERE status != 'Cancelled'
+        `;
+        let revenueParams = [];
+        let paramIndex = 1;
+
+        ({ query: revenueQuery, params: revenueParams, paramIndex } =
+            applyDateFilters(revenueQuery, revenueParams, paramIndex, startDate, endDate, 'sale_date'));
+
+        if (branchId) {
+            revenueQuery += ` AND branch_id = $${paramIndex++}`;
+            revenueParams.push(parseInt(branchId));
+        }
+
+        const salesResult = await db.query(revenueQuery, revenueParams);
+        const { 
+            total_revenue, 
+            total_cogs, 
+            total_profit, 
+            total_advantage_amount,
+            total_advantage_sales,
+            total_regular_sales,
+            total_rider_sales
+        } = salesResult.rows[0];
+
+        // Total Operating Expenses
+        let expensesQuery = `
+            SELECT COALESCE(SUM(amount), 0) AS total_operating_expenses
+            FROM operating_expenses
+            WHERE status = 'active'
+        `;
+        let expensesParams = [];
+        paramIndex = 1;
+
+        ({ query: expensesQuery, params: expensesParams, paramIndex } =
+            applyDateFilters(expensesQuery, expensesParams, paramIndex, startDate, endDate, 'expense_date'));
+
+        const expensesResult = await db.query(expensesQuery, expensesParams);
+        const totalOperatingExpenses = parseFloat(expensesResult.rows[0].total_operating_expenses);
+
+        // Total Salaries
+        let salariesQuery = `
+            SELECT COALESCE(SUM(net_amount), 0) AS total_salaries
+            FROM salary_payments
+            WHERE status = 'paid'
+        `;
+        let salariesParams = [];
+        paramIndex = 1;
+
+        ({ query: salariesQuery, params: salariesParams, paramIndex } =
+            applyDateFilters(salariesQuery, salariesParams, paramIndex, startDate, endDate, 'payment_date'));
+
+        const salariesResult = await db.query(salariesQuery, salariesParams);
+        const totalSalaries = parseFloat(salariesResult.rows[0].total_salaries);
+
+        // Calculate taxable income and tax
+        const grossProfit = parseFloat(total_revenue) - parseFloat(total_cogs);
+        const totalExpenses = totalOperatingExpenses + totalSalaries;
+        const taxableIncome = Math.max(0, grossProfit - totalExpenses);
+        const taxRate = 0.30;
+        const taxAmount = taxableIncome * taxRate;
+        
+        const netProfitBeforeTax = grossProfit - totalExpenses;
+        const netProfit = netProfitBeforeTax - taxAmount;
+
+        res.status(200).json({
+            reportTitle: 'Profit & Loss Summary',
+            filtersUsed: { startDate, endDate, branchId },
+            reportData: {
+                totalRevenue: parseFloat(total_revenue),
+                totalRegularSales: parseFloat(total_regular_sales),
+                totalAdvantageSales: parseFloat(total_advantage_sales),
+                totalRiderSales: parseFloat(total_rider_sales),
+                totalAdvantageAmount: parseFloat(total_advantage_amount),
+                totalCostOfGoodsSold: parseFloat(total_cogs),
+                grossProfit: grossProfit,
+                totalOperatingExpenses: totalOperatingExpenses,
+                totalSalaries: totalSalaries,
+                totalExpenses: totalExpenses,
+                taxableIncome: taxableIncome,
+                taxRate: taxRate * 100,
+                taxAmount: taxAmount,
+                netProfitBeforeTax: netProfitBeforeTax,
+                netProfit: netProfit
+            }
+        });
+
+    } catch (error) {
+        console.error('Error generating Profit & Loss report:', error);
+        res.status(500).json({ error: 'Failed to generate Profit & Loss report.', details: error.message });
+    }
+});
+
+// NEW: Rider Sales Summary (for dashboard)
+router.get('/rider-sales-summary', async (req, res) => {
+    const { startDate, endDate, branchId } = req.query;
+
+    let query = `
+        SELECT 
+            COUNT(DISTINCT rider_id) AS active_riders,
+            COUNT(*) AS total_transactions,
+            COALESCE(SUM(total_amount), 0) AS total_sales,
+            COALESCE(SUM(total_profit), 0) AS total_profit,
+            COALESCE(SUM(balance_due), 0) AS total_outstanding,
+            COALESCE(AVG(total_amount), 0) AS avg_transaction_value
+        FROM sales_transactions
+        WHERE is_rider_sale = true 
+        AND status != 'Cancelled'
+    `;
+    let params = [];
+    let paramIndex = 1;
+
+    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'sale_date'));
+
+    if (branchId) {
+        query += ` AND branch_id = $${paramIndex++}`;
+        params.push(parseInt(branchId));
+    }
+
+    try {
+        const result = await db.query(query, params);
+        res.status(200).json({
+            reportTitle: 'Rider Sales Summary',
+            filtersUsed: { startDate, endDate, branchId },
+            reportData: result.rows[0]
+        });
+    } catch (error) {
+        console.error('Error generating rider sales summary:', error);
+        res.status(500).json({ error: 'Failed to generate rider sales summary.', details: error.message });
     }
 });
 
