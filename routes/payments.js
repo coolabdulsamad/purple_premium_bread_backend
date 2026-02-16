@@ -194,7 +194,7 @@ router.get('/customer/:customerId', async (req, res) => {
 
 // Add to payments.js backend route file
 
-// GET /api/payments/rider/:riderId - Get payment history for a rider
+// GET /api/payments/rider/:riderId - Get payment history for a rider (FIXED)
 router.get('/rider/:riderId', authenticate, async (req, res) => {
     const { riderId } = req.params;
 
@@ -203,9 +203,14 @@ router.get('/rider/:riderId', authenticate, async (req, res) => {
             SELECT 
                 p.*,
                 st.total_amount as sale_total,
-                st.status as sale_status
+                st.status as sale_status,
+                st.balance_due as current_balance_due,
+                c.fullname as customer_name,
+                r.fullname as rider_name
             FROM payments p
             LEFT JOIN sales_transactions st ON p.transaction_id = st.id
+            LEFT JOIN customers c ON p.customer_id = c.id
+            LEFT JOIN riders r ON p.rider_id = r.id
             WHERE p.rider_id = $1
             ORDER BY p.payment_date DESC
         `;
@@ -219,7 +224,7 @@ router.get('/rider/:riderId', authenticate, async (req, res) => {
     }
 });
 
-// GET /api/sales/rider/:riderId/outstanding - Get outstanding sales for a rider
+// GET /api/sales/rider/:riderId/outstanding - Get outstanding sales for a rider (FIXED)
 router.get('/rider/:riderId/outstanding', authenticate, async (req, res) => {
     const { riderId } = req.params;
 
@@ -232,10 +237,11 @@ router.get('/rider/:riderId/outstanding', authenticate, async (req, res) => {
                 balance_due,
                 sale_date,
                 due_date,
-                status
+                status,
+                payment_method
             FROM sales_transactions
-            WHERE rider_id = $1 AND balance_due > 0
-            ORDER BY sale_date ASC
+            WHERE rider_id = $1 AND is_rider_sale = true AND balance_due > 0
+            ORDER BY due_date ASC, sale_date ASC
         `;
 
         const result = await db.query(query, [riderId]);
@@ -247,7 +253,7 @@ router.get('/rider/:riderId/outstanding', authenticate, async (req, res) => {
     }
 });
 
-// POST /api/payments/rider - Record a payment for a rider
+// POST /api/payments/rider - Record a payment for a rider (FIXED)
 router.post('/rider', authenticate, async (req, res) => {
     const {
         transaction_id,
@@ -262,26 +268,76 @@ router.post('/rider', authenticate, async (req, res) => {
     try {
         await client.query('BEGIN');
 
-        // Insert payment record
+        // First, get the rider's customer_id
+        const riderQuery = await client.query(
+            `SELECT customer_id, fullname, current_balance 
+             FROM riders 
+             WHERE id = $1`,
+            [rider_id]
+        );
+
+        if (riderQuery.rows.length === 0) {
+            throw new Error('Rider not found');
+        }
+
+        const rider = riderQuery.rows[0];
+        const customerId = rider.customer_id;
+
+        if (!customerId) {
+            throw new Error('Rider has no associated customer record');
+        }
+
+        // Get the transaction details to verify
+        const transactionQuery = await client.query(
+            `SELECT id, total_amount, amount_paid, balance_due, customer_id 
+             FROM sales_transactions 
+             WHERE id = $1 AND rider_id = $2`,
+            [transaction_id, rider_id]
+        );
+
+        if (transactionQuery.rows.length === 0) {
+            throw new Error('Transaction not found or does not belong to this rider');
+        }
+
+        const transaction = transactionQuery.rows[0];
+
+        // Validate payment amount
+        if (amount > transaction.balance_due) {
+            throw new Error(`Payment amount (₦${amount}) exceeds balance due (₦${transaction.balance_due})`);
+        }
+
+        // Insert payment record with ALL required fields (including customer_id)
         const paymentQuery = `
             INSERT INTO payments (
-                transaction_id, rider_id, amount, payment_method, proof, payment_date
+                transaction_id, 
+                customer_id, 
+                rider_id, 
+                amount, 
+                payment_method, 
+                proof, 
+                payment_date,
+                is_rider_payment
             )
-            VALUES ($1, $2, $3, $4, $5, NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, NOW(), true)
             RETURNING *
         `;
 
         const paymentResult = await client.query(paymentQuery, [
-            transaction_id, rider_id, amount, payment_method, proof
+            transaction_id,
+            customerId,  // This was missing - now included
+            rider_id,
+            amount,
+            payment_method,
+            proof || null
         ]);
 
         // Update the sales transaction
         const updateSaleQuery = `
             UPDATE sales_transactions
             SET amount_paid = amount_paid + $1,
-                balance_due = total_amount - (amount_paid + $1),
+                balance_due = balance_due - $1,
                 status = CASE 
-                    WHEN total_amount - (amount_paid + $1) <= 0 THEN 'Paid'
+                    WHEN balance_due - $1 <= 0 THEN 'Paid'
                     WHEN amount_paid + $1 > 0 THEN 'Partially Paid'
                     ELSE status
                 END,
@@ -298,22 +354,60 @@ router.post('/rider', authenticate, async (req, res) => {
             SET current_balance = current_balance - $1,
                 updated_at = NOW()
             WHERE id = $2
+            RETURNING current_balance
         `;
 
-        await client.query(updateRiderQuery, [amount, rider_id]);
+        const riderUpdateResult = await client.query(updateRiderQuery, [amount, rider_id]);
+
+        // Also update the associated customer's balance
+        const updateCustomerQuery = `
+            UPDATE customers
+            SET balance = balance - $1,
+                updated_at = NOW()
+            WHERE id = $2
+        `;
+
+        await client.query(updateCustomerQuery, [amount, customerId]);
+
+        // Insert into rider_payment_history for tracking
+        const historyQuery = `
+            INSERT INTO rider_payment_history (
+                rider_id, 
+                payment_id, 
+                amount, 
+                payment_date, 
+                payment_method, 
+                notes, 
+                recorded_by
+            )
+            VALUES ($1, $2, $3, NOW(), $4, $5, $6)
+        `;
+
+        await client.query(historyQuery, [
+            rider_id,
+            paymentResult.rows[0].id,
+            amount,
+            payment_method,
+            `Payment for transaction #${transaction_id}`,
+            req.user.id
+        ]);
 
         await client.query('COMMIT');
 
         res.status(201).json({
             message: 'Payment recorded successfully',
             payment: paymentResult.rows[0],
-            updated_sale: saleResult.rows[0]
+            updated_sale: saleResult.rows[0],
+            new_rider_balance: riderUpdateResult.rows[0].current_balance
         });
 
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('Error recording rider payment:', error);
-        res.status(500).json({ error: 'Failed to record payment', details: error.message });
+        res.status(500).json({ 
+            error: 'Failed to record payment', 
+            details: error.message 
+        });
     } finally {
         client.release();
     }
