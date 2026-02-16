@@ -1,19 +1,20 @@
-// purple-premium-bread-api/routes/dashboard.js - UPDATED WITH PROPER FILTERING
+// purple-premium-bread-api/routes/dashboard.js - COMPLETE FIXED VERSION
 const express = require('express');
 const router = express.Router();
 const db = require('../db/db');
 
 // Helper function to apply date filters
 const applyDateFilters = (query, params, paramIndex, startDate, endDate, dateColumn = 'sale_date') => {
-    if (startDate) {
+    if (startDate && startDate !== 'undefined' && startDate !== 'null') {
         query += ` AND ${dateColumn} >= $${paramIndex++}`;
         params.push(startDate);
     }
-    if (endDate) {
+    if (endDate && endDate !== 'undefined' && endDate !== 'null') {
+        // Add one day to include the full end date
         const endOfDay = new Date(endDate);
         endOfDay.setDate(endOfDay.getDate() + 1);
         query += ` AND ${dateColumn} < $${paramIndex++}`;
-        params.push(endOfDay.toISOString());
+        params.push(endOfDay.toISOString().split('T')[0]);
     }
     return { query, params, paramIndex };
 };
@@ -24,35 +25,23 @@ router.get('/kpis', async (req, res) => {
     const client = await db.pool.connect();
     
     try {
+        console.log('KPIs Request with filters:', { startDate, endDate, branchId, category });
+        
         // Build filter conditions
         let salesFilter = '';
-        let customerFilter = '';
-        let productionFilter = '';
-        const salesParams = [];
-        const customerParams = [];
-        const productionParams = [];
+        let salesParams = [];
         let salesParamIndex = 1;
-        let customerParamIndex = 1;
-        let productionParamIndex = 1;
 
-        // Date filters for sales
-        if (startDate) {
+        // Date filters
+        if (startDate && startDate !== 'undefined' && startDate !== 'null') {
             salesFilter += ` AND st.sale_date >= $${salesParamIndex++}`;
             salesParams.push(startDate);
-            customerFilter += ` AND c.created_at >= $${customerParamIndex++}`;
-            customerParams.push(startDate);
-            productionFilter += ` AND pl.production_date >= $${productionParamIndex++}`;
-            productionParams.push(startDate);
         }
-        if (endDate) {
+        if (endDate && endDate !== 'undefined' && endDate !== 'null') {
             const endOfDay = new Date(endDate);
             endOfDay.setDate(endOfDay.getDate() + 1);
             salesFilter += ` AND st.sale_date < $${salesParamIndex++}`;
-            salesParams.push(endOfDay.toISOString());
-            customerFilter += ` AND c.created_at < $${customerParamIndex++}`;
-            customerParams.push(endOfDay.toISOString());
-            productionFilter += ` AND pl.production_date < $${productionParamIndex++}`;
-            productionParams.push(endOfDay.toISOString());
+            salesParams.push(endOfDay.toISOString().split('T')[0]);
         }
 
         // Branch filter
@@ -127,26 +116,24 @@ router.get('/kpis', async (req, res) => {
             SELECT 
                 COALESCE(SUM(quantity_produced), 0) AS total_produced,
                 COALESCE(SUM(waste_quantity), 0) AS total_waste
-            FROM production_logs pl
+            FROM production_logs
             WHERE 1=1
         `;
-        
-        if (startDate || endDate) {
-            if (startDate) {
-                wasteRateQuery += ` AND pl.production_date >= $${productionParamIndex}`;
-                productionParams.push(startDate);
-                productionParamIndex++;
-            }
-            if (endDate) {
-                const endOfDay = new Date(endDate);
-                endOfDay.setDate(endOfDay.getDate() + 1);
-                wasteRateQuery += ` AND pl.production_date < $${productionParamIndex}`;
-                productionParams.push(endOfDay.toISOString());
-                productionParamIndex++;
-            }
+        let wasteParams = [];
+        let wasteParamIndex = 1;
+
+        if (startDate && startDate !== 'undefined' && startDate !== 'null') {
+            wasteRateQuery += ` AND production_date >= $${wasteParamIndex++}`;
+            wasteParams.push(startDate);
+        }
+        if (endDate && endDate !== 'undefined' && endDate !== 'null') {
+            const endOfDay = new Date(endDate);
+            endOfDay.setDate(endOfDay.getDate() + 1);
+            wasteRateQuery += ` AND production_date < $${wasteParamIndex++}`;
+            wasteParams.push(endOfDay.toISOString().split('T')[0]);
         }
 
-        const productionSummaryResult = await client.query(wasteRateQuery, productionParams);
+        const productionSummaryResult = await client.query(wasteRateQuery, wasteParams);
         const totalProduced = parseFloat(productionSummaryResult.rows[0].total_produced || 0);
         const totalWaste = parseFloat(productionSummaryResult.rows[0].total_waste || 0);
         const productionWasteRate = totalProduced > 0 ? (totalWaste / totalProduced) * 100 : 0;
@@ -160,9 +147,24 @@ router.get('/kpis', async (req, res) => {
         const averageSalesValue = parseFloat(avgSalesValueResult.rows[0].average_sales_value);
 
         // 9. New Customers in period (filtered)
+        let customerFilter = '';
+        let customerParams = [];
+        let customerParamIndex = 1;
+
+        if (startDate && startDate !== 'undefined' && startDate !== 'null') {
+            customerFilter += ` AND created_at >= $${customerParamIndex++}`;
+            customerParams.push(startDate);
+        }
+        if (endDate && endDate !== 'undefined' && endDate !== 'null') {
+            const endOfDay = new Date(endDate);
+            endOfDay.setDate(endOfDay.getDate() + 1);
+            customerFilter += ` AND created_at < $${customerParamIndex++}`;
+            customerParams.push(endOfDay.toISOString().split('T')[0]);
+        }
+
         const customersResult = await client.query(`
             SELECT COUNT(*) AS total_customers
-            FROM customers c
+            FROM customers
             WHERE 1=1${customerFilter}
         `, customerParams);
         const totalCustomers = parseInt(customersResult.rows[0].total_customers);
@@ -171,7 +173,9 @@ router.get('/kpis', async (req, res) => {
         let previousSales = 0;
         let previousProfit = 0;
         
-        if (startDate && endDate && salesParams.length > 0) {
+        if (startDate && endDate && startDate !== 'undefined' && endDate !== 'undefined' && 
+            startDate !== 'null' && endDate !== 'null') {
+            
             const start = new Date(startDate);
             const end = new Date(endDate);
             const daysDiff = Math.round((end - start) / (1000 * 60 * 60 * 24)) + 1;
@@ -198,19 +202,17 @@ router.get('/kpis', async (req, res) => {
             let prevParamIndex = 3;
 
             if (branchId && branchId !== 'all' && branchId !== 'undefined' && branchId !== 'null') {
-                prevQuery += ` AND st.branch_id = $${prevParamIndex}`;
+                prevQuery += ` AND st.branch_id = $${prevParamIndex++}`;
                 prevParams.push(parseInt(branchId));
-                prevParamIndex++;
             }
 
             if (category && category !== 'all' && category !== 'undefined' && category !== 'null') {
                 prevQuery += ` AND EXISTS (
                     SELECT 1 FROM sales_items si 
                     JOIN products p ON si.product_id = p.id 
-                    WHERE si.sale_id = st.id AND p.category = $${prevParamIndex}
+                    WHERE si.sale_id = st.id AND p.category = $${prevParamIndex++}
                 )`;
                 prevParams.push(category);
-                prevParamIndex++;
             }
 
             const prevResult = await client.query(prevQuery, prevParams);
@@ -237,7 +239,7 @@ router.get('/kpis', async (req, res) => {
 
     } catch (error) {
         console.error('Error fetching KPIs:', error);
-        res.status(500).json({ error: 'Failed to fetch KPIs.', details: error.message });
+        res.status(500).json({ error: 'Failed to fetch KPIs.', details: error.message, stack: error.stack });
     } finally {
         client.release();
     }
@@ -247,54 +249,69 @@ router.get('/kpis', async (req, res) => {
 router.get('/sales-over-time', async (req, res) => {
     const { period = 'day', limit = 30, startDate, endDate, branchId, category } = req.query;
     
-    let groupBy;
-    if (period === 'month') {
-        groupBy = `TO_CHAR(st.sale_date, 'YYYY-MM')`;
-    } else {
-        groupBy = `DATE(st.sale_date)`;
-    }
-
-    let query = `
-        SELECT
-            ${groupBy} AS period,
-            COALESCE(SUM(st.total_amount), 0) AS total_sales,
-            COALESCE(SUM(st.total_amount - st.total_cogs), 0) AS total_profit
-        FROM sales_transactions st
-        WHERE st.status != 'Cancelled'
-    `;
-    
-    const params = [];
-    let paramIndex = 1;
-
-    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'st.sale_date'));
-
-    if (branchId && branchId !== 'all' && branchId !== 'undefined' && branchId !== 'null') {
-        query += ` AND st.branch_id = $${paramIndex++}`;
-        params.push(parseInt(branchId));
-    }
-
-    if (category && category !== 'all' && category !== 'undefined' && category !== 'null') {
-        query += ` AND EXISTS (
-            SELECT 1 FROM sales_items si 
-            JOIN products p ON si.product_id = p.id 
-            WHERE si.sale_id = st.id AND p.category = $${paramIndex++}
-        )`;
-        params.push(category);
-    }
-
-    query += `
-        GROUP BY period
-        ORDER BY period DESC
-        LIMIT $${paramIndex}
-    `;
-    params.push(parseInt(limit));
-
     try {
+        console.log('Sales-over-time Request:', { period, limit, startDate, endDate, branchId, category });
+        
+        let groupBy;
+        if (period === 'month') {
+            groupBy = `TO_CHAR(st.sale_date, 'YYYY-MM')`;
+        } else {
+            groupBy = `DATE(st.sale_date)`;
+        }
+
+        let query = `
+            SELECT
+                ${groupBy} AS period,
+                COALESCE(SUM(st.total_amount), 0) AS total_sales,
+                COALESCE(SUM(st.total_amount - st.total_cogs), 0) AS total_profit
+            FROM sales_transactions st
+            WHERE st.status != 'Cancelled'
+        `;
+        
+        const params = [];
+        let paramIndex = 1;
+
+        // Date filters
+        if (startDate && startDate !== 'undefined' && startDate !== 'null') {
+            query += ` AND st.sale_date >= $${paramIndex++}`;
+            params.push(startDate);
+        }
+        if (endDate && endDate !== 'undefined' && endDate !== 'null') {
+            const endOfDay = new Date(endDate);
+            endOfDay.setDate(endOfDay.getDate() + 1);
+            query += ` AND st.sale_date < $${paramIndex++}`;
+            params.push(endOfDay.toISOString().split('T')[0]);
+        }
+
+        // Branch filter
+        if (branchId && branchId !== 'all' && branchId !== 'undefined' && branchId !== 'null') {
+            query += ` AND st.branch_id = $${paramIndex++}`;
+            params.push(parseInt(branchId));
+        }
+
+        // Category filter
+        if (category && category !== 'all' && category !== 'undefined' && category !== 'null') {
+            query += ` AND EXISTS (
+                SELECT 1 FROM sales_items si 
+                JOIN products p ON si.product_id = p.id 
+                WHERE si.sale_id = st.id AND p.category = $${paramIndex++}
+            )`;
+            params.push(category);
+        }
+
+        query += `
+            GROUP BY period
+            ORDER BY period DESC
+            LIMIT $${paramIndex}
+        `;
+        params.push(parseInt(limit));
+
         const result = await db.query(query, params);
         res.status(200).json(result.rows.reverse());
+        
     } catch (error) {
         console.error('Error fetching sales over time:', error);
-        res.status(500).json({ error: 'Failed to fetch sales over time.', details: error.message });
+        res.status(500).json({ error: 'Failed to fetch sales over time.', details: error.message, stack: error.stack });
     }
 });
 
@@ -302,57 +319,225 @@ router.get('/sales-over-time', async (req, res) => {
 router.get('/top-selling-products', async (req, res) => {
     const { orderBy = 'amount', limit = 5, startDate, endDate, branchId, category } = req.query;
 
-    let orderClause = 'SUM(si.quantity * si.price_at_sale)';
-    if (orderBy === 'quantity') {
-        orderClause = 'SUM(si.quantity)';
-    }
-
-    let query = `
-        SELECT
-            p.id,
-            p.name AS product_name,
-            p.image_url,
-            p.units->0->>'display' AS unit_display,
-            SUM(si.quantity) AS total_quantity_sold,
-            SUM(si.quantity * si.price_at_sale) AS total_sales_amount
-        FROM sales_items si
-        JOIN sales_transactions st ON si.sale_id = st.id
-        JOIN products p ON si.product_id = p.id
-        WHERE st.status != 'Cancelled'
-    `;
-    
-    const params = [];
-    let paramIndex = 1;
-
-    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'st.sale_date'));
-
-    if (branchId && branchId !== 'all' && branchId !== 'undefined' && branchId !== 'null') {
-        query += ` AND st.branch_id = $${paramIndex++}`;
-        params.push(parseInt(branchId));
-    }
-
-    if (category && category !== 'all' && category !== 'undefined' && category !== 'null') {
-        query += ` AND p.category = $${paramIndex++}`;
-        params.push(category);
-    }
-
-    query += `
-        GROUP BY p.id, p.name, p.image_url, p.units
-        ORDER BY ${orderClause} DESC
-        LIMIT $${paramIndex}
-    `;
-    params.push(parseInt(limit));
-
     try {
+        console.log('Top-products Request:', { orderBy, limit, startDate, endDate, branchId, category });
+
+        let orderClause = 'SUM(si.quantity * si.price_at_sale)';
+        if (orderBy === 'quantity') {
+            orderClause = 'SUM(si.quantity)';
+        }
+
+        let query = `
+            SELECT
+                p.id,
+                p.name AS product_name,
+                p.image_url,
+                p.units->0->>'display' AS unit_display,
+                SUM(si.quantity) AS total_quantity_sold,
+                SUM(si.quantity * si.price_at_sale) AS total_sales_amount
+            FROM sales_items si
+            JOIN sales_transactions st ON si.sale_id = st.id
+            JOIN products p ON si.product_id = p.id
+            WHERE st.status != 'Cancelled'
+        `;
+        
+        const params = [];
+        let paramIndex = 1;
+
+        // Date filters
+        if (startDate && startDate !== 'undefined' && startDate !== 'null') {
+            query += ` AND st.sale_date >= $${paramIndex++}`;
+            params.push(startDate);
+        }
+        if (endDate && endDate !== 'undefined' && endDate !== 'null') {
+            const endOfDay = new Date(endDate);
+            endOfDay.setDate(endOfDay.getDate() + 1);
+            query += ` AND st.sale_date < $${paramIndex++}`;
+            params.push(endOfDay.toISOString().split('T')[0]);
+        }
+
+        // Branch filter
+        if (branchId && branchId !== 'all' && branchId !== 'undefined' && branchId !== 'null') {
+            query += ` AND st.branch_id = $${paramIndex++}`;
+            params.push(parseInt(branchId));
+        }
+
+        // Category filter
+        if (category && category !== 'all' && category !== 'undefined' && category !== 'null') {
+            query += ` AND p.category = $${paramIndex++}`;
+            params.push(category);
+        }
+
+        query += `
+            GROUP BY p.id, p.name, p.image_url, p.units
+            ORDER BY ${orderClause} DESC
+            LIMIT $${paramIndex}
+        `;
+        params.push(parseInt(limit));
+
         const result = await db.query(query, params);
         res.status(200).json(result.rows);
+        
     } catch (error) {
         console.error('Error fetching top selling products:', error);
-        res.status(500).json({ error: 'Failed to fetch top selling products.', details: error.message });
+        res.status(500).json({ error: 'Failed to fetch top selling products.', details: error.message, stack: error.stack });
     }
 });
 
-// GET /api/dashboard/stock-levels - Overview of current finished product stock levels (for critical low stock)
+// GET /api/dashboard/sales-by-payment-method WITH FILTERS
+router.get('/sales-by-payment-method', async (req, res) => {
+    const { startDate, endDate, branchId } = req.query;
+
+    try {
+        console.log('Payment-methods Request:', { startDate, endDate, branchId });
+
+        let query = `
+            SELECT
+                payment_method,
+                COALESCE(SUM(total_amount), 0) AS total_sales_amount
+            FROM sales_transactions st
+            WHERE st.status != 'Cancelled'
+        `;
+        
+        const params = [];
+        let paramIndex = 1;
+
+        // Date filters
+        if (startDate && startDate !== 'undefined' && startDate !== 'null') {
+            query += ` AND st.sale_date >= $${paramIndex++}`;
+            params.push(startDate);
+        }
+        if (endDate && endDate !== 'undefined' && endDate !== 'null') {
+            const endOfDay = new Date(endDate);
+            endOfDay.setDate(endOfDay.getDate() + 1);
+            query += ` AND st.sale_date < $${paramIndex++}`;
+            params.push(endOfDay.toISOString().split('T')[0]);
+        }
+
+        // Branch filter
+        if (branchId && branchId !== 'all' && branchId !== 'undefined' && branchId !== 'null') {
+            query += ` AND st.branch_id = $${paramIndex++}`;
+            params.push(parseInt(branchId));
+        }
+
+        query += `
+            GROUP BY payment_method
+            ORDER BY total_sales_amount DESC
+        `;
+
+        const result = await db.query(query, params);
+        res.status(200).json(result.rows);
+        
+    } catch (error) {
+        console.error('Error fetching sales by payment method:', error);
+        res.status(500).json({ error: 'Failed to fetch sales by payment method.', details: error.message, stack: error.stack });
+    }
+});
+
+// GET /api/dashboard/raw-material-usage-trend WITH FILTERS
+router.get('/raw-material-usage-trend', async (req, res) => {
+    const { period = 'month', limit = 6, startDate, endDate } = req.query;
+    
+    try {
+        console.log('Raw-material Request:', { period, limit, startDate, endDate });
+
+        let groupBy;
+        if (period === 'month') {
+            groupBy = `TO_CHAR(transaction_date, 'YYYY-MM')`;
+        } else {
+            groupBy = `DATE(transaction_date)`;
+        }
+
+        let query = `
+            SELECT
+                ${groupBy} AS period,
+                COALESCE(SUM(quantity_change), 0) AS net_material_change,
+                COALESCE(SUM(CASE WHEN quantity_change < 0 THEN -quantity_change ELSE 0 END), 0) AS total_material_used,
+                COALESCE(SUM(CASE WHEN quantity_change > 0 THEN quantity_change ELSE 0 END), 0) AS total_material_added
+            FROM material_transactions
+            WHERE 1=1
+        `;
+        
+        const params = [];
+        let paramIndex = 1;
+
+        // Date filters
+        if (startDate && startDate !== 'undefined' && startDate !== 'null') {
+            query += ` AND transaction_date >= $${paramIndex++}`;
+            params.push(startDate);
+        }
+        if (endDate && endDate !== 'undefined' && endDate !== 'null') {
+            const endOfDay = new Date(endDate);
+            endOfDay.setDate(endOfDay.getDate() + 1);
+            query += ` AND transaction_date < $${paramIndex++}`;
+            params.push(endOfDay.toISOString().split('T')[0]);
+        }
+
+        query += `
+            GROUP BY period
+            ORDER BY period DESC
+            LIMIT $${paramIndex}
+        `;
+        params.push(parseInt(limit));
+
+        const result = await db.query(query, params);
+        res.status(200).json(result.rows.reverse());
+        
+    } catch (error) {
+        console.error('Error fetching raw material usage trend:', error);
+        res.status(500).json({ error: 'Failed to fetch raw material usage trend.', details: error.message, stack: error.stack });
+    }
+});
+
+// GET /api/dashboard/production-over-time - Daily production and waste trend WITH FILTERS
+router.get('/production-over-time', async (req, res) => {
+    const { limit = 30, startDate, endDate } = req.query;
+    
+    try {
+        console.log('Production Request:', { limit, startDate, endDate });
+
+        let query = `
+            SELECT
+                production_date,
+                COALESCE(SUM(quantity_produced), 0) AS total_produced,
+                COALESCE(SUM(waste_quantity), 0) AS total_waste,
+                COALESCE(SUM(quantity_produced - waste_quantity), 0) AS net_production
+            FROM production_logs
+            WHERE 1=1
+        `;
+        
+        const params = [];
+        let paramIndex = 1;
+
+        // Date filters
+        if (startDate && startDate !== 'undefined' && startDate !== 'null') {
+            query += ` AND production_date >= $${paramIndex++}`;
+            params.push(startDate);
+        }
+        if (endDate && endDate !== 'undefined' && endDate !== 'null') {
+            const endOfDay = new Date(endDate);
+            endOfDay.setDate(endOfDay.getDate() + 1);
+            query += ` AND production_date < $${paramIndex++}`;
+            params.push(endOfDay.toISOString().split('T')[0]);
+        }
+
+        query += `
+            GROUP BY production_date
+            ORDER BY production_date DESC
+            LIMIT $${paramIndex}
+        `;
+        params.push(parseInt(limit));
+
+        const result = await db.query(query, params);
+        res.status(200).json(result.rows.reverse());
+        
+    } catch (error) {
+        console.error('Error fetching production over time:', error);
+        res.status(500).json({ error: 'Failed to fetch production over time.', details: error.message, stack: error.stack });
+    }
+});
+
+// GET /api/dashboard/stock-levels - Overview of current finished product stock levels (unchanged - no filters needed)
 router.get('/stock-levels', async (req, res) => {
     try {
         const query = `
@@ -376,85 +561,7 @@ router.get('/stock-levels', async (req, res) => {
     }
 });
 
-// GET /api/dashboard/sales-by-payment-method WITH FILTERS
-router.get('/sales-by-payment-method', async (req, res) => {
-    const { startDate, endDate, branchId } = req.query;
-
-    let query = `
-        SELECT
-            payment_method,
-            COALESCE(SUM(total_amount), 0) AS total_sales_amount
-        FROM sales_transactions st
-        WHERE st.status != 'Cancelled'
-    `;
-    
-    const params = [];
-    let paramIndex = 1;
-
-    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'st.sale_date'));
-
-    if (branchId && branchId !== 'all' && branchId !== 'undefined' && branchId !== 'null') {
-        query += ` AND st.branch_id = $${paramIndex++}`;
-        params.push(parseInt(branchId));
-    }
-
-    query += `
-        GROUP BY payment_method
-        ORDER BY total_sales_amount DESC
-    `;
-
-    try {
-        const result = await db.query(query, params);
-        res.status(200).json(result.rows);
-    } catch (error) {
-        console.error('Error fetching sales by payment method:', error);
-        res.status(500).json({ error: 'Failed to fetch sales by payment method.', details: error.message });
-    }
-});
-
-// GET /api/dashboard/raw-material-usage-trend WITH FILTERS
-router.get('/raw-material-usage-trend', async (req, res) => {
-    const { period = 'month', limit = 6, startDate, endDate } = req.query;
-    
-    let groupBy;
-    if (period === 'month') {
-        groupBy = `TO_CHAR(transaction_date, 'YYYY-MM')`;
-    } else {
-        groupBy = `DATE(transaction_date)`;
-    }
-
-    let query = `
-        SELECT
-            ${groupBy} AS period,
-            COALESCE(SUM(quantity_change), 0) AS net_material_change,
-            COALESCE(SUM(CASE WHEN quantity_change < 0 THEN -quantity_change ELSE 0 END), 0) AS total_material_used,
-            COALESCE(SUM(CASE WHEN quantity_change > 0 THEN quantity_change ELSE 0 END), 0) AS total_material_added
-        FROM material_transactions
-        WHERE 1=1
-    `;
-    
-    const params = [];
-    let paramIndex = 1;
-
-    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'transaction_date'));
-
-    query += `
-        GROUP BY period
-        ORDER BY period DESC
-        LIMIT $${paramIndex}
-    `;
-    params.push(parseInt(limit));
-
-    try {
-        const result = await db.query(query, params);
-        res.status(200).json(result.rows.reverse());
-    } catch (error) {
-        console.error('Error fetching raw material usage trend:', error);
-        res.status(500).json({ error: 'Failed to fetch raw material usage trend.', details: error.message });
-    }
-});
-
-// GET /api/dashboard/customers-by-gender (no date filtering - demographic data)
+// GET /api/dashboard/customers-by-gender (unchanged - demographic data)
 router.get('/customers-by-gender', async (req, res) => {
     try {
         const query = `
@@ -471,41 +578,6 @@ router.get('/customers-by-gender', async (req, res) => {
     } catch (error) {
         console.error('Error fetching customers by gender:', error);
         res.status(500).json({ error: 'Failed to fetch customers by gender.', details: error.message });
-    }
-});
-
-// GET /api/dashboard/production-over-time - Daily production and waste trend WITH FILTERS
-router.get('/production-over-time', async (req, res) => {
-    const { limit = 30, startDate, endDate } = req.query;
-    
-    let query = `
-        SELECT
-            production_date,
-            COALESCE(SUM(quantity_produced), 0) AS total_produced,
-            COALESCE(SUM(waste_quantity), 0) AS total_waste,
-            COALESCE(SUM(quantity_produced - waste_quantity), 0) AS net_production
-        FROM production_logs
-        WHERE 1=1
-    `;
-    
-    const params = [];
-    let paramIndex = 1;
-
-    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'production_date'));
-
-    query += `
-        GROUP BY production_date
-        ORDER BY production_date DESC
-        LIMIT $${paramIndex}
-    `;
-    params.push(parseInt(limit));
-
-    try {
-        const result = await db.query(query, params);
-        res.status(200).json(result.rows.reverse());
-    } catch (error) {
-        console.error('Error fetching production over time:', error);
-        res.status(500).json({ error: 'Failed to fetch production over time.', details: error.message });
     }
 });
 
