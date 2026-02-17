@@ -359,10 +359,6 @@ router.post('/rider', authenticate, async (req, res) => {
 
         const riderUpdateResult = await client.query(updateRiderQuery, [amount, rider_id]);
 
-        // FIX: Check if this transaction already has a customer balance update
-        // We need to see if the customer's balance was already increased when the sale was created
-        // If it was, we should decrease it now when payment is made
-        
         // Get the original sale to check if it was a credit sale that updated customer balance
         const originalSaleQuery = await client.query(
             `SELECT payment_method, balance_due, amount_paid 
@@ -370,9 +366,12 @@ router.post('/rider', authenticate, async (req, res) => {
              WHERE id = $1`,
             [transaction_id]
         );
-        
+
         const originalSale = originalSaleQuery.rows[0];
-        
+
+        // Initialize customerUpdateResult variable outside the if block
+        let customerUpdateResult = null;
+
         // Only update customer balance if this was a credit sale (which means customer balance was increased at sale time)
         // AND if this payment is reducing the balance due
         if (originalSale.payment_method === 'Credit') {
@@ -384,10 +383,10 @@ router.post('/rider', authenticate, async (req, res) => {
                 RETURNING balance
             `;
 
-            const customerUpdateResult = await client.query(updateCustomerQuery, [amount, customerId]);
+            customerUpdateResult = await client.query(updateCustomerQuery, [amount, customerId]);
 
-            console.log('Customer balance updated from', 
-                parseFloat(customerUpdateResult.rows[0].balance) + parseFloat(amount), 
+            console.log('Customer balance updated from',
+                parseFloat(customerUpdateResult.rows[0].balance) + parseFloat(amount),
                 'to', customerUpdateResult.rows[0].balance);
         } else {
             console.log('Payment for non-credit sale - skipping customer balance update');
@@ -423,15 +422,17 @@ router.post('/rider', authenticate, async (req, res) => {
             payment: paymentResult.rows[0],
             updated_sale: saleResult.rows[0],
             new_rider_balance: riderUpdateResult.rows[0].current_balance,
-            new_customer_balance: originalSale.payment_method === 'Credit' ? customerUpdateResult.rows[0].balance : 'No change (non-credit sale)'
+            new_customer_balance: originalSale.payment_method === 'Credit' && customerUpdateResult
+                ? customerUpdateResult.rows[0].balance
+                : 'No change (non-credit sale)'
         });
 
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('Error recording rider payment:', error);
-        res.status(500).json({ 
-            error: 'Failed to record payment', 
-            details: error.message 
+        res.status(500).json({
+            error: 'Failed to record payment',
+            details: error.message
         });
     } finally {
         client.release();
