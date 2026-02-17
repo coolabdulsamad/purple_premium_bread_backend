@@ -470,7 +470,6 @@ router.post('/process', async (req, res) => {
         }
 
         // --- STEP 5: UPDATE RIDER BALANCE IF RIDER CREDIT SALE ---
-        // --- STEP 5: UPDATE RIDER BALANCE IF RIDER CREDIT SALE ---
         if (isRiderSale && riderId && paymentMethod === 'Credit' && balanceDue > 0) {
             console.log(`Updating rider ${riderId} balance by ${balanceDue} (remaining amount)`);
 
