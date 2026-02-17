@@ -470,62 +470,49 @@ router.post('/process', async (req, res) => {
         }
 
         // --- STEP 5: UPDATE RIDER BALANCE IF RIDER CREDIT SALE ---
-        // if (isRiderSale && riderId && paymentMethod === 'Credit' && balanceDue > 0) {
-        //     console.log(`Updating rider ${riderId} balance by ${balanceDue} (remaining amount)`);
+        // --- STEP 5: UPDATE RIDER BALANCE IF RIDER CREDIT SALE ---
+        if (isRiderSale && riderId && paymentMethod === 'Credit' && balanceDue > 0) {
+            console.log(`Updating rider ${riderId} balance by ${balanceDue} (remaining amount)`);
 
-        //     // First check if rider exists and get current balance
-        //     const riderCheck = await client.query(
-        //         'SELECT current_balance, credit_limit FROM riders WHERE id = $1',
-        //         [riderId]
-        //     );
+            // First check if rider exists and get current balance
+            const riderCheck = await client.query(
+                'SELECT current_balance, credit_limit FROM riders WHERE id = $1',
+                [riderId]
+            );
 
-        //     if (riderCheck.rows.length === 0) {
-        //         throw new Error('Rider not found');
-        //     }
+            if (riderCheck.rows.length === 0) {
+                throw new Error('Rider not found');
+            }
 
-        //     const rider = riderCheck.rows[0];
-        //     const newBalance = parseFloat(rider.current_balance) + parseFloat(balanceDue);
+            const rider = riderCheck.rows[0];
+            const newBalance = parseFloat(rider.current_balance) + parseFloat(balanceDue);
 
-        //     // Check if new balance would exceed credit limit
-        //     if (newBalance > parseFloat(rider.credit_limit)) {
-        //         throw new Error(`This sale would exceed rider's credit limit. Current balance: ₦${rider.current_balance}, Credit limit: ₦${rider.credit_limit}, Additional amount: ₦${balanceDue}`);
-        //     }
+            // Check if new balance would exceed credit limit
+            if (newBalance > parseFloat(rider.credit_limit)) {
+                throw new Error(`This sale would exceed rider's credit limit. Current balance: ₦${rider.current_balance}, Credit limit: ₦${rider.credit_limit}, Additional amount: ₦${balanceDue}`);
+            }
 
-        //     const updateRiderBalanceQuery = `
-        //         UPDATE riders 
-        //         SET current_balance = current_balance + $1, 
-        //             updated_at = NOW() 
-        //         WHERE id = $2
-        //         RETURNING *;
-        //     `;
+            const updateRiderBalanceQuery = `
+        UPDATE riders 
+        SET current_balance = current_balance + $1, 
+            updated_at = NOW() 
+        WHERE id = $2
+        RETURNING *;
+    `;
 
-        //     const riderUpdateResult = await client.query(updateRiderBalanceQuery, [balanceDue, riderId]);
+            const riderUpdateResult = await client.query(updateRiderBalanceQuery, [balanceDue, riderId]);
 
-        //     if (riderUpdateResult.rowCount === 0) {
-        //         throw new Error('Rider not found when updating balance');
-        //     }
+            if (riderUpdateResult.rowCount === 0) {
+                throw new Error('Rider not found when updating balance');
+            }
 
-        //     console.log('Rider balance updated successfully:', riderUpdateResult.rows[0]);
+            console.log('Rider balance updated successfully:', riderUpdateResult.rows[0]);
 
-        //     // Also update the associated customer balance if rider has a customer_id
-        //     const riderDetails = await client.query(
-        //         'SELECT customer_id FROM riders WHERE id = $1',
-        //         [riderId]
-        //     );
+            // REMOVED: The customer balance update section that was here
 
-        //     if (riderDetails.rows[0]?.customer_id) {
-        //         const riderCustomerId = riderDetails.rows[0].customer_id;
-        //         await client.query(
-        //             `UPDATE customers 
-        //              SET balance = balance + $1, updated_at = NOW() 
-        //              WHERE id = $2`,
-        //             [balanceDue, riderCustomerId]
-        //         );
-        //         console.log(`Associated customer ${riderCustomerId} balance updated`);
-        //     }
-        // } else if (isRiderSale && riderId && paymentMethod === 'Credit' && balanceDue === 0) {
-        //     console.log(`Rider credit sale with full payment - no balance to update for rider ${riderId}`);
-        // }
+        } else if (isRiderSale && riderId && paymentMethod === 'Credit' && balanceDue === 0) {
+            console.log(`Rider credit sale with full payment - no balance to update for rider ${riderId}`);
+        }
 
         // --- STEP 6: Record the Sale ---
         const saleInsertQuery = `
