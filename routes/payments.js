@@ -253,7 +253,7 @@ router.get('/rider/:riderId/outstanding', authenticate, async (req, res) => {
     }
 });
 
-// POST /api/payments/rider - Record a payment for a rider (FIXED to also update customer balance)
+// POST /api/payments/rider - Record a payment for a rider (FIXED to prevent double counting)
 router.post('/rider', authenticate, async (req, res) => {
     const {
         transaction_id,
@@ -359,20 +359,39 @@ router.post('/rider', authenticate, async (req, res) => {
 
         const riderUpdateResult = await client.query(updateRiderQuery, [amount, rider_id]);
 
-        // CRITICAL FIX: Also update the associated customer's balance
-        const updateCustomerQuery = `
-            UPDATE customers
-            SET balance = balance - $1,
-                updated_at = NOW()
-            WHERE id = $2
-            RETURNING balance
-        `;
+        // FIX: Check if this transaction already has a customer balance update
+        // We need to see if the customer's balance was already increased when the sale was created
+        // If it was, we should decrease it now when payment is made
+        
+        // Get the original sale to check if it was a credit sale that updated customer balance
+        const originalSaleQuery = await client.query(
+            `SELECT payment_method, balance_due, amount_paid 
+             FROM sales_transactions 
+             WHERE id = $1`,
+            [transaction_id]
+        );
+        
+        const originalSale = originalSaleQuery.rows[0];
+        
+        // Only update customer balance if this was a credit sale (which means customer balance was increased at sale time)
+        // AND if this payment is reducing the balance due
+        if (originalSale.payment_method === 'Credit') {
+            const updateCustomerQuery = `
+                UPDATE customers
+                SET balance = balance - $1,
+                    updated_at = NOW()
+                WHERE id = $2
+                RETURNING balance
+            `;
 
-        const customerUpdateResult = await client.query(updateCustomerQuery, [amount, customerId]);
+            const customerUpdateResult = await client.query(updateCustomerQuery, [amount, customerId]);
 
-        console.log('Customer balance updated from', 
-            parseFloat(customerUpdateResult.rows[0].balance) + parseFloat(amount), 
-            'to', customerUpdateResult.rows[0].balance);
+            console.log('Customer balance updated from', 
+                parseFloat(customerUpdateResult.rows[0].balance) + parseFloat(amount), 
+                'to', customerUpdateResult.rows[0].balance);
+        } else {
+            console.log('Payment for non-credit sale - skipping customer balance update');
+        }
 
         // Insert into rider_payment_history for tracking
         const historyQuery = `
@@ -404,7 +423,7 @@ router.post('/rider', authenticate, async (req, res) => {
             payment: paymentResult.rows[0],
             updated_sale: saleResult.rows[0],
             new_rider_balance: riderUpdateResult.rows[0].current_balance,
-            new_customer_balance: customerUpdateResult.rows[0].balance // Include customer balance in response
+            new_customer_balance: originalSale.payment_method === 'Credit' ? customerUpdateResult.rows[0].balance : 'No change (non-credit sale)'
         });
 
     } catch (error) {
