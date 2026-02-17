@@ -253,7 +253,7 @@ router.get('/rider/:riderId/outstanding', authenticate, async (req, res) => {
     }
 });
 
-// POST /api/payments/rider - Record a payment for a rider (FIXED)
+// POST /api/payments/rider - Record a payment for a rider (FIXED to also update customer balance)
 router.post('/rider', authenticate, async (req, res) => {
     const {
         transaction_id,
@@ -324,7 +324,7 @@ router.post('/rider', authenticate, async (req, res) => {
 
         const paymentResult = await client.query(paymentQuery, [
             transaction_id,
-            customerId,  // This was missing - now included
+            customerId,
             rider_id,
             amount,
             payment_method,
@@ -359,15 +359,20 @@ router.post('/rider', authenticate, async (req, res) => {
 
         const riderUpdateResult = await client.query(updateRiderQuery, [amount, rider_id]);
 
-        // Also update the associated customer's balance
+        // CRITICAL FIX: Also update the associated customer's balance
         const updateCustomerQuery = `
             UPDATE customers
             SET balance = balance - $1,
                 updated_at = NOW()
             WHERE id = $2
+            RETURNING balance
         `;
 
-        await client.query(updateCustomerQuery, [amount, customerId]);
+        const customerUpdateResult = await client.query(updateCustomerQuery, [amount, customerId]);
+
+        console.log('Customer balance updated from', 
+            parseFloat(customerUpdateResult.rows[0].balance) + parseFloat(amount), 
+            'to', customerUpdateResult.rows[0].balance);
 
         // Insert into rider_payment_history for tracking
         const historyQuery = `
@@ -398,7 +403,8 @@ router.post('/rider', authenticate, async (req, res) => {
             message: 'Payment recorded successfully',
             payment: paymentResult.rows[0],
             updated_sale: saleResult.rows[0],
-            new_rider_balance: riderUpdateResult.rows[0].current_balance
+            new_rider_balance: riderUpdateResult.rows[0].current_balance,
+            new_customer_balance: customerUpdateResult.rows[0].balance // Include customer balance in response
         });
 
     } catch (error) {
