@@ -1,100 +1,95 @@
-// purple-premium-bread-api/routes/payments.js
+// routes/payments.js
 const express = require('express');
 const router = express.Router();
 const db = require('../db/db');
-const { jwtDecode } = require('jwt-decode'); // For getting user ID from token
 const authenticate = require('../middleware/authenticate');
+const { recordMoneyTransaction } = require('../utils/money');
 
-// Helper to get user ID from token (if token is sent in headers)
-const getUserIdFromToken = (req) => {
+// ---------------------------------------------------------------------------
+// Wallet schema guard (advance_balance columns + wallet_transactions table are
+// created by migration 002; features degrade gracefully until it is applied)
+// ---------------------------------------------------------------------------
+let walletSchemaReady = null;
+async function ensureWalletSchema() {
+    if (walletSchemaReady !== null) return walletSchemaReady;
     try {
-        const token = req.headers.authorization?.split(' ')[1];
-        if (token) {
-            const decoded = jwtDecode(token);
-            return decoded.id;
-        }
+        const r = await db.query(`
+            SELECT
+              (SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'customers' AND column_name = 'advance_balance') AS c_col,
+              (SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'riders' AND column_name = 'advance_balance') AS r_col,
+              (SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'wallet_transactions') AS w_tbl
+        `);
+        const row = r.rows[0];
+        walletSchemaReady = Number(row.c_col) > 0 && Number(row.r_col) > 0 && Number(row.w_tbl) > 0;
     } catch (e) {
-        console.error("Failed to decode token for payment transaction", e);
+        walletSchemaReady = false;
     }
-    return null;
-};
+    return walletSchemaReady;
+}
 
-// POST /api/payments - Record a new payment against a sales transaction (especially credit sales)
+// POST /api/payments - Record a payment against a specific sale
 router.post('/', async (req, res) => {
-    const {
-        transaction_id,
-        customer_id,
-        amount,
-        payment_method,
-        proof, // Payment proof can be a reference number or image URL
-        recorded_by_user_id // The user who is recording this payment
-    } = req.body;
+    const { transaction_id, customer_id, amount, payment_date, payment_method, proof } = req.body;
 
-    // Validate essential fields
-    if (!transaction_id || !customer_id || !amount || amount <= 0) {
-        return res.status(400).json({ error: 'Missing required payment details: transaction_id, customer_id, and a positive amount are required.' });
+    if (!transaction_id || !customer_id || !amount) {
+        return res.status(400).json({ error: 'Transaction ID, Customer ID, and amount are required.' });
     }
 
-    const client = await db.pool.connect();
+    const client = await db.getClient();
     try {
         await client.query('BEGIN');
 
         // 1. Insert the new payment record
-        const paymentInsertQuery = `
+        const paymentQuery = `
             INSERT INTO payments (transaction_id, customer_id, amount, payment_date, payment_method, proof)
-            VALUES ($1, $2, $3, NOW(), $4, $5)
-            RETURNING *;
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id;
         `;
-        const paymentResult = await client.query(paymentInsertQuery, [
-            transaction_id,
-            customer_id,
-            amount,
-            payment_method || 'Cash', // Default to Cash if not provided
-            proof
-        ]);
-        const newPayment = paymentResult.rows[0];
+        const paymentResult = await client.query(paymentQuery, [transaction_id, customer_id, amount, payment_date, payment_method, proof]);
+        const newPaymentId = paymentResult.rows[0].id;
 
-        // 2. Update the sales_transaction status, amount_paid, and balance_due
-        const transactionUpdateQuery = `
+        // 2. Update the corresponding sales_transactions record
+        const paymentAmount = parseFloat(amount);
+        const updateSaleQuery = `
             UPDATE sales_transactions
             SET
                 amount_paid = amount_paid + $1,
                 balance_due = balance_due - $1,
-                status = CASE WHEN (balance_due - $1) <= 0 THEN 'Paid' ELSE 'Partially Paid' END,
-                updated_at = NOW() -- Assuming an updated_at column on sales_transactions
-            WHERE id = $2
-            RETURNING amount_paid, balance_due, status;
+                status = CASE
+                    WHEN balance_due - $1 <= 0 THEN 'Paid'
+                    WHEN amount_paid + $1 > 0 THEN 'Partially Paid'
+                    ELSE status
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $2;
         `;
-        const transactionUpdateResult = await client.query(transactionUpdateQuery, [amount, transaction_id]);
+        await client.query(updateSaleQuery, [paymentAmount, transaction_id]);
 
-        if (transactionUpdateResult.rows.length === 0) {
-            throw new Error('Sales transaction not found or already fully paid.');
-        }
-
-        const updatedTransaction = transactionUpdateResult.rows[0];
-
-        // 3. Update the customer's overall balance
-        const customerUpdateQuery = `
+        // 3. Update the customer's total credit balance
+        const updateCustomerQuery = `
             UPDATE customers
-            SET
-                balance = balance - $1,
-                updated_at = NOW()
-            WHERE id = $2
-            RETURNING balance;
+            SET balance = balance - $1
+            WHERE id = $2;
         `;
-        const customerUpdateResult = await client.query(customerUpdateQuery, [amount, customer_id]);
-
-        if (customerUpdateResult.rows.length === 0) {
-            throw new Error('Customer not found.');
-        }
+        await client.query(updateCustomerQuery, [paymentAmount, customer_id]);
 
         await client.query('COMMIT');
-        res.status(201).json({
-            message: 'Payment recorded successfully.',
-            payment: newPayment,
-            updatedTransaction: updatedTransaction,
-            updatedCustomerBalance: customerUpdateResult.rows[0].balance
+
+        // 4. Mirror into Money Management (fail-open)
+        await recordMoneyTransaction({
+            direction: 'IN',
+            amount: paymentAmount,
+            category: 'sale_payment',
+            payment_method: payment_method || 'Cash',
+            reference_type: 'payment',
+            reference_id: newPaymentId,
+            description: `Payment received for sale #${transaction_id}`,
+            transaction_date: payment_date || null,
+            recorded_by: req.user ? req.user.id : null,
+            approval_id: req.approvalBypassId || null
         });
+
+        res.status(201).json({ message: 'Payment recorded successfully.', paymentId: newPaymentId });
 
     } catch (error) {
         await client.query('ROLLBACK');
@@ -105,335 +100,472 @@ router.post('/', async (req, res) => {
     }
 });
 
-// GET /api/payments - Fetch all payments with optional filters
-router.get('/', async (req, res) => {
-    const { customerId, transactionId, startDate, endDate, paymentMethod } = req.query;
-    let query = `
-        SELECT
-            py.id,
-            py.transaction_id,
-            py.customer_id,
-            c.fullname AS customer_name,
-            py.amount,
-            py.payment_date,
-            py.payment_method,
-            py.proof,
-            st.total_amount AS sales_total_amount,
-            st.balance_due AS sales_balance_before_payment -- This will be the current balance from sales_transactions
-        FROM payments py
-        JOIN customers c ON py.customer_id = c.id
-        JOIN sales_transactions st ON py.transaction_id = st.id
-        WHERE 1=1
-    `;
-    const params = [];
-    let paramIndex = 1;
+// GET /api/payments/outstanding?customer_id= | ?rider_id=
+// Oldest-first list of unpaid sales for a customer or rider + advance balance.
+router.get('/outstanding', async (req, res) => {
+    const customerId = parseInt(req.query.customer_id);
+    const riderId = parseInt(req.query.rider_id);
 
-    if (customerId) {
-        query += ` AND py.customer_id = $${paramIndex++}`;
-        params.push(customerId);
+    if ((isNaN(customerId) || !customerId) && (isNaN(riderId) || !riderId)) {
+        return res.status(400).json({ error: 'Provide customer_id or rider_id.' });
     }
-    if (transactionId) {
-        query += ` AND py.transaction_id = $${paramIndex++}`;
-        params.push(transactionId);
-    }
-    if (startDate) {
-        query += ` AND py.payment_date >= $${paramIndex++}`;
-        params.push(startDate);
-    }
-    if (endDate) {
-        query += ` AND py.payment_date <= $${paramIndex++}`;
-        params.push(endDate);
-    }
-    if (paymentMethod) {
-        query += ` AND py.payment_method ILIKE $${paramIndex++}`;
-        params.push(`%${paymentMethod}%`);
-    }
-
-    query += ` ORDER BY py.payment_date DESC, py.id DESC`;
 
     try {
-        const result = await db.query(query, params);
-        res.status(200).json(result.rows);
+        const walletReady = await ensureWalletSchema();
+        let ownerType, ownerId, salesQuery, ownerQuery;
+
+        if (!isNaN(riderId) && riderId) {
+            ownerType = 'RIDER';
+            ownerId = riderId;
+            salesQuery = `
+                SELECT id, sale_date, due_date, total_amount, amount_paid, balance_due, status, payment_method
+                FROM sales_transactions
+                WHERE rider_id = $1 AND is_rider_sale = true AND balance_due > 0
+                ORDER BY due_date ASC NULLS LAST, sale_date ASC, id ASC
+            `;
+            ownerQuery = walletReady
+                ? 'SELECT id, fullname AS name, current_balance, COALESCE(advance_balance, 0) AS advance_balance FROM riders WHERE id = $1'
+                : 'SELECT id, fullname AS name, current_balance, 0 AS advance_balance FROM riders WHERE id = $1';
+        } else {
+            ownerType = 'CUSTOMER';
+            ownerId = customerId;
+            salesQuery = `
+                SELECT id, sale_date, due_date, total_amount, amount_paid, balance_due, status, payment_method
+                FROM sales_transactions
+                WHERE customer_id = $1 AND balance_due > 0
+                ORDER BY due_date ASC NULLS LAST, sale_date ASC, id ASC
+            `;
+            ownerQuery = walletReady
+                ? 'SELECT id, fullname AS name, balance AS current_balance, COALESCE(advance_balance, 0) AS advance_balance FROM customers WHERE id = $1'
+                : 'SELECT id, fullname AS name, balance AS current_balance, 0 AS advance_balance FROM customers WHERE id = $1';
+        }
+
+        const [sales, owner] = await Promise.all([
+            db.query(salesQuery, [ownerId]),
+            db.query(ownerQuery, [ownerId])
+        ]);
+
+        if (owner.rows.length === 0) {
+            return res.status(404).json({ error: `${ownerType === 'RIDER' ? 'Rider' : 'Customer'} not found.` });
+        }
+
+        const totalOutstanding = sales.rows.reduce((sum, s) => sum + parseFloat(s.balance_due), 0);
+
+        res.status(200).json({
+            owner_type: ownerType,
+            owner: owner.rows[0],
+            outstanding_sales: sales.rows,
+            total_outstanding: Math.round(totalOutstanding * 100) / 100
+        });
     } catch (error) {
-        console.error('Error fetching payments:', error);
-        res.status(500).json({ error: 'Failed to fetch payments.', details: error.message });
+        console.error('Error fetching outstanding sales:', error);
+        res.status(500).json({ error: 'Failed to fetch outstanding sales.', details: error.message });
     }
 });
 
-// GET /api/payments/customer/:customerId - Fetch all payments for a specific customer
-router.get('/customer/:customerId', async (req, res) => {
-    const { customerId } = req.params;
-    try {
-        const result = await db.query(
-            `SELECT
-                py.id,
-                py.transaction_id,
-                py.customer_id,
-                c.fullname AS customer_name,
-                py.amount,
-                py.payment_date,
-                py.payment_method,
-                py.proof,
-                st.total_amount AS sales_total_amount,
-                st.balance_due AS sales_balance_due_at_payment_time -- This needs care, as balance_due changes.
-                                                                    -- For historical view, better to capture transaction's state at time of payment.
-                                                                    -- For now, it will show current balance_due of the transaction.
-            FROM payments py
-            JOIN customers c ON py.customer_id = c.id
-            JOIN sales_transactions st ON py.transaction_id = st.id
-            WHERE py.customer_id = $1
-            ORDER BY py.payment_date DESC, py.id DESC;`,
-            [customerId]
-        );
-        res.status(200).json(result.rows);
-    } catch (error) {
-        console.error('Error fetching customer payments:', error);
-        res.status(500).json({ error: 'Failed to fetch customer payments.', details: error.message });
+// POST /api/payments/allocate - Credit payment by AMOUNT (no sale selection).
+// Allocates oldest-first across the customer's / rider's unpaid sales.
+// Any leftover after clearing all debt is credited to the advance wallet.
+router.post('/allocate', authenticate, async (req, res) => {
+    const { customer_id, rider_id, amount, payment_method = 'Cash', payment_date, proof, notes } = req.body;
+
+    const customerId = parseInt(customer_id);
+    const riderId = parseInt(rider_id);
+    const payAmount = parseFloat(amount);
+
+    if ((isNaN(customerId) || !customerId) && (isNaN(riderId) || !riderId)) {
+        return res.status(400).json({ error: 'Provide customer_id or rider_id.' });
     }
-});
-
-// Add to payments.js backend route file
-
-// GET /api/payments/rider/:riderId - Get payment history for a rider (FIXED)
-router.get('/rider/:riderId', authenticate, async (req, res) => {
-    const { riderId } = req.params;
-
-    try {
-        const query = `
-            SELECT 
-                p.*,
-                st.total_amount as sale_total,
-                st.status as sale_status,
-                st.balance_due as current_balance_due,
-                c.fullname as customer_name,
-                r.fullname as rider_name
-            FROM payments p
-            LEFT JOIN sales_transactions st ON p.transaction_id = st.id
-            LEFT JOIN customers c ON p.customer_id = c.id
-            LEFT JOIN riders r ON p.rider_id = r.id
-            WHERE p.rider_id = $1
-            ORDER BY p.payment_date DESC
-        `;
-
-        const result = await db.query(query, [riderId]);
-        res.status(200).json(result.rows);
-
-    } catch (error) {
-        console.error('Error fetching rider payments:', error);
-        res.status(500).json({ error: 'Failed to fetch payment history', details: error.message });
+    if (isNaN(payAmount) || payAmount <= 0) {
+        return res.status(400).json({ error: 'A positive payment amount is required.' });
     }
-});
 
-// GET /api/sales/rider/:riderId/outstanding - Get outstanding sales for a rider (FIXED)
-router.get('/rider/:riderId/outstanding', authenticate, async (req, res) => {
-    const { riderId } = req.params;
+    const isRider = !isNaN(riderId) && riderId;
+    const ownerType = isRider ? 'RIDER' : 'CUSTOMER';
+    const ownerId = isRider ? riderId : customerId;
 
-    try {
-        const query = `
-            SELECT 
-                id,
-                total_amount,
-                amount_paid,
-                balance_due,
-                sale_date,
-                due_date,
-                status,
-                payment_method
-            FROM sales_transactions
-            WHERE rider_id = $1 AND is_rider_sale = true AND balance_due > 0
-            ORDER BY due_date ASC, sale_date ASC
-        `;
+    const walletReady = await ensureWalletSchema();
 
-        const result = await db.query(query, [riderId]);
-        res.status(200).json(result.rows);
-
-    } catch (error) {
-        console.error('Error fetching outstanding rider sales:', error);
-        res.status(500).json({ error: 'Failed to fetch outstanding sales', details: error.message });
-    }
-});
-
-// POST /api/payments/rider - Record a payment for a rider (FIXED to prevent double counting)
-router.post('/rider', authenticate, async (req, res) => {
-    const {
-        transaction_id,
-        rider_id,
-        amount,
-        payment_method,
-        proof
-    } = req.body;
-
-    const client = await db.pool.connect();
-
+    const client = await db.getClient();
     try {
         await client.query('BEGIN');
 
-        // First, get the rider's customer_id
-        const riderQuery = await client.query(
-            `SELECT customer_id, fullname, current_balance 
-             FROM riders 
-             WHERE id = $1`,
-            [rider_id]
-        );
-
-        if (riderQuery.rows.length === 0) {
-            throw new Error('Rider not found');
+        // 1. Lock the owner record
+        const ownerTable = isRider ? 'riders' : 'customers';
+        const ownerRes = await client.query(`SELECT id FROM ${ownerTable} WHERE id = $1 FOR UPDATE`, [ownerId]);
+        if (ownerRes.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: `${isRider ? 'Rider' : 'Customer'} not found.` });
         }
 
-        const rider = riderQuery.rows[0];
-        const customerId = rider.customer_id;
+        // 2. Fetch unpaid sales oldest-first
+        const salesQuery = isRider
+            ? `SELECT id, balance_due, payment_method FROM sales_transactions
+               WHERE rider_id = $1 AND is_rider_sale = true AND balance_due > 0
+               ORDER BY due_date ASC NULLS LAST, sale_date ASC, id ASC FOR UPDATE`
+            : `SELECT id, balance_due FROM sales_transactions
+               WHERE customer_id = $1 AND balance_due > 0
+               ORDER BY due_date ASC NULLS LAST, sale_date ASC, id ASC FOR UPDATE`;
+        const sales = await client.query(salesQuery, [ownerId]);
 
-        if (!customerId) {
-            throw new Error('Rider has no associated customer record');
+        // 3. Allocate the amount across sales, oldest first
+        let remaining = payAmount;
+        const allocations = [];
+        for (const sale of sales.rows) {
+            if (remaining <= 0) break;
+            const due = parseFloat(sale.balance_due);
+            const pay = Math.min(remaining, due);
+            if (pay <= 0) continue;
+
+            const pmt = await client.query(
+                `INSERT INTO payments (transaction_id, customer_id, rider_id, amount, payment_date, payment_method, proof, is_rider_payment)
+                 VALUES ($1, $2, $3, $4, COALESCE($5, CURRENT_DATE), $6, $7, $8)
+                 RETURNING id`,
+                [
+                    sale.id,
+                    isRider ? null : customerId,
+                    isRider ? riderId : null,
+                    pay,
+                    payment_date || null,
+                    payment_method,
+                    proof || null,
+                    isRider
+                ]
+            );
+
+            await client.query(
+                `UPDATE sales_transactions
+                 SET amount_paid = amount_paid + $1,
+                     balance_due = balance_due - $1,
+                     status = CASE
+                         WHEN balance_due - $1 <= 0 THEN 'Paid'
+                         ELSE 'Partially Paid'
+                     END,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = $2`,
+                [pay, sale.id]
+            );
+
+            // Rider remittance against a credit sale also clears the linked customer's balance
+            if (isRider && sale.payment_method === 'Credit') {
+                await client.query(
+                    `UPDATE customers c SET balance = balance - $1
+                     FROM sales_transactions s
+                     WHERE s.id = $2 AND c.id = s.customer_id`,
+                    [pay, sale.id]
+                );
+            }
+
+            allocations.push({ sale_id: sale.id, payment_id: pmt.rows[0].id, allocated: pay });
+            remaining -= pay;
         }
 
-        // Get the transaction details to verify
-        const transactionQuery = await client.query(
-            `SELECT id, total_amount, amount_paid, balance_due, customer_id 
-             FROM sales_transactions 
-             WHERE id = $1 AND rider_id = $2`,
-            [transaction_id, rider_id]
-        );
+        const allocatedTotal = Math.round((payAmount - remaining) * 100) / 100;
 
-        if (transactionQuery.rows.length === 0) {
-            throw new Error('Transaction not found or does not belong to this rider');
+        // 4. Reduce the owner's debt balance
+        if (allocatedTotal > 0) {
+            if (isRider) {
+                await client.query('UPDATE riders SET current_balance = current_balance - $1 WHERE id = $2', [allocatedTotal, riderId]);
+            } else {
+                await client.query('UPDATE customers SET balance = balance - $1 WHERE id = $2', [allocatedTotal, customerId]);
+            }
         }
 
-        const transaction = transactionQuery.rows[0];
-
-        // Validate payment amount
-        if (amount > transaction.balance_due) {
-            throw new Error(`Payment amount (₦${amount}) exceeds balance due (₦${transaction.balance_due})`);
+        // 5. Leftover -> advance wallet (requires migration 002)
+        let walletCredit = 0;
+        if (remaining > 0.004) {
+            if (!walletReady) {
+                await client.query('ROLLBACK');
+                return res.status(503).json({
+                    error: 'Payment exceeds total outstanding debt and the advance-wallet schema is not installed yet. Apply migration 002, or reduce the amount.',
+                    total_outstanding: allocatedTotal
+                });
+            }
+            walletCredit = Math.round(remaining * 100) / 100;
+            const balRes = await client.query(
+                `UPDATE ${ownerTable} SET advance_balance = COALESCE(advance_balance, 0) + $1 WHERE id = $2 RETURNING advance_balance`,
+                [walletCredit, ownerId]
+            );
+            await client.query(
+                `INSERT INTO wallet_transactions (owner_type, owner_id, transaction_type, amount, balance_after, reference_type, reference_id, notes, created_by)
+                 VALUES ($1, $2, 'DEPOSIT', $3, $4, 'payment_allocation', $5, $6, $7)`,
+                [
+                    ownerType,
+                    ownerId,
+                    walletCredit,
+                    balRes.rows[0].advance_balance,
+                    allocations.length ? allocations[0].payment_id : null,
+                    notes || 'Overpayment from credit settlement credited to advance wallet',
+                    req.user.id
+                ]
+            );
         }
-
-        // Insert payment record with ALL required fields (including customer_id)
-        const paymentQuery = `
-            INSERT INTO payments (
-                transaction_id, 
-                customer_id, 
-                rider_id, 
-                amount, 
-                payment_method, 
-                proof, 
-                payment_date,
-                is_rider_payment
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, NOW(), true)
-            RETURNING *
-        `;
-
-        const paymentResult = await client.query(paymentQuery, [
-            transaction_id,
-            customerId,
-            rider_id,
-            amount,
-            payment_method,
-            proof || null
-        ]);
-
-        // Update the sales transaction
-        const updateSaleQuery = `
-            UPDATE sales_transactions
-            SET amount_paid = amount_paid + $1,
-                balance_due = balance_due - $1,
-                status = CASE 
-                    WHEN balance_due - $1 <= 0 THEN 'Paid'
-                    WHEN amount_paid + $1 > 0 THEN 'Partially Paid'
-                    ELSE status
-                END,
-                updated_at = NOW()
-            WHERE id = $2
-            RETURNING *
-        `;
-
-        const saleResult = await client.query(updateSaleQuery, [amount, transaction_id]);
-
-        // Update rider's current balance
-        const updateRiderQuery = `
-            UPDATE riders
-            SET current_balance = current_balance - $1,
-                updated_at = NOW()
-            WHERE id = $2
-            RETURNING current_balance
-        `;
-
-        const riderUpdateResult = await client.query(updateRiderQuery, [amount, rider_id]);
-
-        // Get the original sale to check if it was a credit sale that updated customer balance
-        const originalSaleQuery = await client.query(
-            `SELECT payment_method, balance_due, amount_paid 
-             FROM sales_transactions 
-             WHERE id = $1`,
-            [transaction_id]
-        );
-
-        const originalSale = originalSaleQuery.rows[0];
-
-        // Initialize customerUpdateResult variable outside the if block
-        let customerUpdateResult = null;
-
-        // Only update customer balance if this was a credit sale (which means customer balance was increased at sale time)
-        // AND if this payment is reducing the balance due
-        if (originalSale.payment_method === 'Credit') {
-            const updateCustomerQuery = `
-                UPDATE customers
-                SET balance = balance - $1,
-                    updated_at = NOW()
-                WHERE id = $2
-                RETURNING balance
-            `;
-
-            customerUpdateResult = await client.query(updateCustomerQuery, [amount, customerId]);
-
-            console.log('Customer balance updated from',
-                parseFloat(customerUpdateResult.rows[0].balance) + parseFloat(amount),
-                'to', customerUpdateResult.rows[0].balance);
-        } else {
-            console.log('Payment for non-credit sale - skipping customer balance update');
-        }
-
-        // Insert into rider_payment_history for tracking
-        const historyQuery = `
-            INSERT INTO rider_payment_history (
-                rider_id, 
-                payment_id, 
-                amount, 
-                payment_date, 
-                payment_method, 
-                notes, 
-                recorded_by
-            )
-            VALUES ($1, $2, $3, NOW(), $4, $5, $6)
-        `;
-
-        await client.query(historyQuery, [
-            rider_id,
-            paymentResult.rows[0].id,
-            amount,
-            payment_method,
-            `Payment for transaction #${transaction_id}`,
-            req.user.id
-        ]);
 
         await client.query('COMMIT');
 
+        // 6. Money Management mirror (fail-open)
+        if (allocatedTotal > 0) {
+            await recordMoneyTransaction({
+                direction: 'IN',
+                amount: allocatedTotal,
+                category: 'debt_payment',
+                payment_method,
+                reference_type: 'payment_allocation',
+                reference_id: allocations.length ? allocations[0].payment_id : null,
+                description: `${isRider ? 'Rider' : 'Customer'} debt settlement auto-allocated across ${allocations.length} sale(s)`,
+                transaction_date: payment_date || null,
+                recorded_by: req.user.id,
+                approval_id: req.approvalBypassId || null
+            });
+        }
+        if (walletCredit > 0) {
+            await recordMoneyTransaction({
+                direction: 'IN',
+                amount: walletCredit,
+                category: isRider ? 'rider_deposit' : 'customer_deposit',
+                payment_method,
+                reference_type: 'payment_allocation',
+                reference_id: null,
+                description: `Advance wallet top-up from ${isRider ? 'rider' : 'customer'} overpayment`,
+                transaction_date: payment_date || null,
+                recorded_by: req.user.id,
+                approval_id: req.approvalBypassId || null
+            });
+        }
+
         res.status(201).json({
-            message: 'Payment recorded successfully',
-            payment: paymentResult.rows[0],
-            updated_sale: saleResult.rows[0],
-            new_rider_balance: riderUpdateResult.rows[0].current_balance,
-            new_customer_balance: originalSale.payment_method === 'Credit' && customerUpdateResult
-                ? customerUpdateResult.rows[0].balance
-                : 'No change (non-credit sale)'
+            message: walletCredit > 0
+                ? `Payment allocated: NGN ${allocatedTotal.toFixed(2)} cleared debt, NGN ${walletCredit.toFixed(2)} credited to advance wallet.`
+                : `Payment allocated across ${allocations.length} sale(s), oldest first.`,
+            total_amount: payAmount,
+            allocated: allocatedTotal,
+            wallet_credit: walletCredit,
+            allocations
         });
 
     } catch (error) {
         await client.query('ROLLBACK');
-        console.error('Error recording rider payment:', error);
-        res.status(500).json({
-            error: 'Failed to record payment',
-            details: error.message
+        console.error('Error allocating payment:', error);
+        res.status(500).json({ error: 'Failed to allocate payment.', details: error.message });
+    } finally {
+        client.release();
+    }
+});
+
+// GET /api/payments - Get all payment records
+router.get('/', async (req, res) => {
+    const { customerId, transactionId, startDate, endDate, paymentMethod } = req.query;
+
+    let query = `
+        SELECT
+            p.id,
+            p.amount,
+            p.payment_date,
+            p.payment_method,
+            p.proof,
+            st.id as transaction_id,
+            c.fullname as customer_name
+        FROM payments p
+        JOIN sales_transactions st ON p.transaction_id = st.id
+        JOIN customers c ON p.customer_id = c.id
+    `;
+
+    const whereClauses = [];
+    const queryParams = [];
+    let paramIndex = 1;
+
+    if (customerId) {
+        whereClauses.push(`p.customer_id = $${paramIndex++}`);
+        queryParams.push(customerId);
+    }
+    if (transactionId) {
+        whereClauses.push(`p.transaction_id = $${paramIndex++}`);
+        queryParams.push(transactionId);
+    }
+    if (startDate) {
+        whereClauses.push(`p.payment_date >= $${paramIndex++}`);
+        queryParams.push(startDate);
+    }
+    if (endDate) {
+        whereClauses.push(`p.payment_date <= $${paramIndex++}`);
+        queryParams.push(endDate);
+    }
+    if (paymentMethod) {
+        whereClauses.push(`p.payment_method = $${paramIndex++}`);
+        queryParams.push(paymentMethod);
+    }
+
+    if (whereClauses.length > 0) {
+        query += ' WHERE ' + whereClauses.join(' AND ');
+    }
+
+    query += ' ORDER BY p.payment_date DESC, p.id DESC;';
+
+    try {
+        const result = await db.query(query, queryParams);
+        res.status(200).json(result.rows);
+    } catch (error) {
+        console.error('Error fetching payments:', error);
+        res.status(500).json({ error: 'Failed to fetch payments.' });
+    }
+});
+
+// GET /api/payments/customer/:customerId
+router.get('/customer/:customerId', async (req, res) => {
+    const { customerId } = req.params;
+    try {
+        const query = `
+            SELECT
+                p.id,
+                p.amount,
+                p.payment_date,
+                p.payment_method,
+                p.proof,
+                st.id as transaction_id,
+                c.fullname as customer_name
+            FROM payments p
+            JOIN sales_transactions st ON p.transaction_id = st.id
+            JOIN customers c ON p.customer_id = c.id
+            WHERE p.customer_id = $1
+            ORDER BY p.payment_date DESC, p.id DESC;
+        `;
+        const result = await db.query(query, [customerId]);
+        res.status(200).json(result.rows);
+    } catch (error) {
+        console.error(`Error fetching payments for customer ${customerId}:`, error);
+        res.status(500).json({ error: 'Failed to fetch payments for customer.' });
+    }
+});
+
+// GET /api/payments/rider/:riderId - Get payment history for a specific rider
+router.get('/rider/:riderId', authenticate, async (req, res) => {
+    const { riderId } = req.params;
+    try {
+        const query = `
+            SELECT
+                p.id,
+                p.amount,
+                p.payment_date,
+                p.payment_method,
+                st.id as transaction_id,
+                c.fullname as customer_name
+            FROM payments p
+            JOIN sales_transactions st ON p.transaction_id = st.id
+            JOIN customers c ON p.customer_id = c.id
+            WHERE p.rider_id = $1
+            ORDER BY p.payment_date DESC, p.id DESC;
+        `;
+        const result = await db.query(query, [riderId]);
+        res.status(200).json(result.rows);
+    } catch (error) {
+        console.error(`Error fetching payments for rider ${riderId}:`, error);
+        res.status(500).json({ error: 'Failed to fetch payments for rider.' });
+    }
+});
+
+// GET /api/payments/rider/:riderId/outstanding - Get outstanding sales for a rider
+router.get('/rider/:riderId/outstanding', async (req, res) => {
+    const { riderId } = req.params;
+    try {
+        const query = `
+            SELECT id, due_date, balance_due
+            FROM sales_transactions
+            WHERE rider_id = $1 AND is_rider_sale = true AND balance_due > 0
+            ORDER BY due_date ASC, sale_date ASC;
+        `;
+        const result = await db.query(query, [riderId]);
+        res.status(200).json(result.rows);
+    } catch (error) {
+        console.error(`Error fetching outstanding sales for rider ${riderId}:`, error);
+        res.status(500).json({ error: 'Failed to fetch outstanding sales for rider.' });
+    }
+});
+
+// POST /api/payments/rider - Record a rider payment against a specific sale
+router.post('/rider', async (req, res) => {
+    const { transaction_id, rider_id, amount, payment_date, payment_method } = req.body;
+
+    if (!transaction_id || !rider_id || !amount) {
+        return res.status(400).json({ error: 'Transaction ID, Rider ID, and amount are required.' });
+    }
+
+    const client = await db.getClient();
+    try {
+        await client.query('BEGIN');
+
+        const saleResult = await client.query('SELECT * FROM sales_transactions WHERE id = $1', [transaction_id]);
+        if (saleResult.rows.length === 0) {
+            throw new Error('Sale transaction not found.');
+        }
+        const sale = saleResult.rows[0];
+        const paymentAmount = parseFloat(amount);
+
+        if (paymentAmount > sale.balance_due) {
+            return res.status(400).json({ error: 'Payment amount cannot be greater than the balance due.' });
+        }
+
+        const paymentQuery = `
+            INSERT INTO payments (transaction_id, rider_id, customer_id, amount, payment_date, payment_method, is_rider_payment)
+            VALUES ($1, $2, $3, $4, $5, $6, true)
+            RETURNING id;
+        `;
+        const paymentResult = await client.query(paymentQuery, [transaction_id, rider_id, sale.customer_id, paymentAmount, payment_date, payment_method]);
+        const newPaymentId = paymentResult.rows[0].id;
+
+        const newBalanceDue = sale.balance_due - paymentAmount;
+        const newStatus = newBalanceDue <= 0 ? 'Paid' : 'Partially Paid';
+
+        const updateSaleQuery = `
+            UPDATE sales_transactions
+            SET amount_paid = amount_paid + $1, balance_due = $2, status = $3, updated_at = CURRENT_TIMESTAMP
+            WHERE id = $4;
+        `;
+        await client.query(updateSaleQuery, [paymentAmount, newBalanceDue, newStatus, transaction_id]);
+
+        const updateRiderQuery = `
+            UPDATE riders
+            SET current_balance = current_balance - $1
+            WHERE id = $2;
+        `;
+        await client.query(updateRiderQuery, [paymentAmount, rider_id]);
+
+        if (sale.payment_method === 'Credit') {
+            const updateCustomerQuery = `
+                UPDATE customers
+                SET balance = balance - $1
+                WHERE id = $2;
+            `;
+            await client.query(updateCustomerQuery, [paymentAmount, sale.customer_id]);
+        }
+
+        const historyQuery = `
+            INSERT INTO rider_payment_history (rider_id, amount, payment_date)
+            VALUES ($1, $2, $3);
+        `;
+        await client.query(historyQuery, [rider_id, paymentAmount, payment_date]);
+
+        await client.query('COMMIT');
+
+        // Money Management mirror (fail-open)
+        await recordMoneyTransaction({
+            direction: 'IN',
+            amount: paymentAmount,
+            category: 'sale_payment',
+            payment_method: payment_method || 'Cash',
+            reference_type: 'rider_payment',
+            reference_id: newPaymentId,
+            description: `Rider remittance for sale #${transaction_id}`,
+            transaction_date: payment_date || null,
+            recorded_by: req.user ? req.user.id : null,
+            approval_id: req.approvalBypassId || null
         });
+
+        res.status(201).json({ message: 'Rider payment recorded successfully.', paymentId: newPaymentId });
+
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('Error recording rider payment:', error);
+        res.status(500).json({ error: 'Failed to record rider payment.', details: error.message });
     } finally {
         client.release();
     }
