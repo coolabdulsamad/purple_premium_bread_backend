@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db/db');
 const authenticate = require('../middleware/authenticate'); // Import your auth middleware
+const { recordMoneyTransaction, removeMoneyTransactionsByReference } = require('../utils/money');
 
 // Apply authentication to all routes
 router.use(authenticate);
@@ -301,6 +302,20 @@ router.post('/', async (req, res) => {
             recurrence_pattern
         ]);
 
+        // Mirror into money management (cash/bank OUT). Fail-open: never blocks the expense.
+        await recordMoneyTransaction({
+            direction: 'OUT',
+            amount: parseFloat(amount),
+            category: 'expense',
+            reference_type: 'expense',
+            reference_id: result.rows[0].id,
+            description: `Expense — ${expense_type}${reference_number ? ` (ref ${reference_number})` : ''}`,
+            payment_method: payment_method || 'Cash',
+            transaction_date: expense_date || null,
+            recorded_by: req.user.id,
+            approval_request_id: req.approvalBypassId || null
+        });
+
         res.status(201).json(result.rows[0]);
     } catch (error) {
         console.error('Error creating expense:', error);
@@ -357,6 +372,20 @@ router.put('/:id', async (req, res) => {
             id
         ]);
 
+        // Re-mirror into money management: reverse the old entry, record the new one
+        await removeMoneyTransactionsByReference('expense', id);
+        await recordMoneyTransaction({
+            direction: 'OUT',
+            amount: parseFloat(amount),
+            category: 'expense',
+            reference_type: 'expense',
+            reference_id: parseInt(id),
+            description: `Expense — ${expense_type}${reference_number ? ` (ref ${reference_number})` : ''}`,
+            payment_method: payment_method || 'Cash',
+            transaction_date: expense_date || null,
+            recorded_by: req.user.id
+        });
+
         res.status(200).json(result.rows[0]);
     } catch (error) {
         console.error('Error updating expense:', error);
@@ -373,6 +402,9 @@ router.delete('/:id', async (req, res) => {
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'Expense not found.' });
         }
+
+        // Reverse the matching money-management entry
+        await removeMoneyTransactionsByReference('expense', id);
 
         res.status(200).json({ message: 'Expense deleted successfully.', deletedExpense: result.rows[0] });
     } catch (error) {
