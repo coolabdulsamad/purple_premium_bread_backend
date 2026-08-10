@@ -36,13 +36,14 @@ const staffMembersRoutes = require('./routes/staffs');
 const companyDebtsRoutes = require('./routes/companyDebts');
 const riderRoutes = require('./routes/riders');
 
-// System upgrades (Phase 2): permissions, workflow, audit
+// System upgrades: permissions, workflow, audit, money management
 const resolveUser = require('./middleware/resolveUser');
 const { permissionGuard } = require('./middleware/permissionGuard');
 const { workflowGate } = require('./utils/workflow');
 const { auditMiddleware } = require('./utils/audit');
 const permissionsRoutes = require('./routes/permissions');
 const approvalsRoutes = require('./routes/approvals');
+const moneyRoutes = require('./routes/money');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -99,6 +100,7 @@ app.use('/api/salaries/company-debts', companyDebtsRoutes);
 app.use('/api/riders', riderRoutes);
 app.use('/api/permissions', permissionsRoutes);
 app.use('/api/approvals', approvalsRoutes);
+app.use('/api/money', moneyRoutes);
 
 // Simple test route
 app.get('/', (req, res) => {
