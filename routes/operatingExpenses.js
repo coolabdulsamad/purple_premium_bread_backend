@@ -7,19 +7,82 @@ const authenticate = require('../middleware/authenticate'); // Import your auth 
 // Apply authentication to all routes
 router.use(authenticate);
 
-// GET /api/operating-expenses - Get all operating expenses with filters
+// Predefined expense categories & types (used for dropdown option selection in the UI)
+const EXPENSE_CATEGORIES = {
+    'Production': ['Raw Material Purchase', 'Packaging Materials', 'Equipment Repair', 'Equipment Purchase', 'Gas/Fuel', 'Water', 'Other Production'],
+    'Operations': ['Rent', 'Electricity', 'Transport/Delivery', 'Vehicle Maintenance', 'Communication', 'Cleaning Supplies', 'Other Operations'],
+    'Staff': ['Staff Welfare', 'Staff Training', 'Medical', 'Uniforms', 'Other Staff'],
+    'Administrative': ['Office Supplies', 'Licenses & Permits', 'Bank Charges', 'Legal & Professional', 'Insurance', 'Other Administrative'],
+    'Marketing': ['Advertising', 'Promotions', 'Branding', 'Other Marketing'],
+    'Miscellaneous': ['Donations', 'Fines & Penalties', 'Other']
+};
+
+// Helper: build shared parameterized WHERE conditions for list + summary
+function buildExpenseConditions(query, params, startIndex) {
+    const {
+        startDate, endDate, category, expenseType, paymentMethod, viewType = 'monthly'
+    } = query;
+
+    let where = '';
+    let paramCount = startIndex;
+
+    // Date filtering based on view type (defaults to the current month)
+    if (viewType && viewType !== 'all') {
+        let dateCondition = '';
+        switch (viewType) {
+            case 'today':
+                dateCondition = `DATE(oe.expense_date) = CURRENT_DATE`;
+                break;
+            case 'weekly':
+                dateCondition = `oe.expense_date >= DATE_TRUNC('week', CURRENT_DATE) AND oe.expense_date < DATE_TRUNC('week', CURRENT_DATE) + INTERVAL '1 week'`;
+                break;
+            case 'monthly':
+                dateCondition = `oe.expense_date >= DATE_TRUNC('month', CURRENT_DATE) AND oe.expense_date < DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month'`;
+                break;
+            case 'yearly':
+                dateCondition = `oe.expense_date >= DATE_TRUNC('year', CURRENT_DATE) AND oe.expense_date < DATE_TRUNC('year', CURRENT_DATE) + INTERVAL '1 year'`;
+                break;
+            case 'custom':
+                if (startDate && endDate) {
+                    dateCondition = `oe.expense_date >= $${paramCount} AND oe.expense_date <= $${paramCount + 1}`;
+                    params.push(startDate, endDate);
+                    paramCount += 2;
+                }
+                break;
+        }
+        if (dateCondition) {
+            where += ` AND ${dateCondition}`;
+        }
+    }
+
+    // Additional filters — ALL parameterized (previously category/expenseType were
+    // string-interpolated into the summary query = SQL injection vulnerability)
+    if (category) {
+        where += ` AND oe.category = $${paramCount}`;
+        params.push(category);
+        paramCount++;
+    }
+    if (expenseType) {
+        where += ` AND oe.expense_type ILIKE $${paramCount}`;
+        params.push(`%${expenseType}%`);
+        paramCount++;
+    }
+    if (paymentMethod) {
+        where += ` AND oe.payment_method = $${paramCount}`;
+        params.push(paymentMethod);
+        paramCount++;
+    }
+
+    return { where, paramCount };
+}
+
+// GET /api/operating-expenses - Get operating expenses with filters (defaults to current month)
 router.get('/', async (req, res) => {
     try {
-        const {
-            startDate,
-            endDate,
-            category,
-            expenseType,
-            paymentMethod,
-            viewType = 'all',
-            page = 1,
-            limit = 50
-        } = req.query;
+        const { page = 1, limit = 50 } = req.query;
+
+        const params = [];
+        const { where, paramCount } = buildExpenseConditions(req.query, params, 1);
 
         let query = `
             SELECT 
@@ -28,88 +91,44 @@ router.get('/', async (req, res) => {
                 u.username as recorded_by_username
             FROM operating_expenses oe
             LEFT JOIN users u ON oe.recorded_by = u.id
-            WHERE 1=1
+            WHERE 1=1 ${where}
         `;
-        const params = [];
-        let paramCount = 1;
-
-        // Date filtering based on view type
-        if (viewType !== 'all') {
-            let dateCondition = '';
-            const now = new Date();
-            
-            switch (viewType) {
-                case 'today':
-                    dateCondition = `DATE(oe.expense_date) = CURRENT_DATE`;
-                    break;
-                case 'weekly':
-                    dateCondition = `oe.expense_date >= DATE_TRUNC('week', CURRENT_DATE) AND oe.expense_date < DATE_TRUNC('week', CURRENT_DATE) + INTERVAL '1 week'`;
-                    break;
-                case 'monthly':
-                    dateCondition = `oe.expense_date >= DATE_TRUNC('month', CURRENT_DATE) AND oe.expense_date < DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month'`;
-                    break;
-                case 'custom':
-                    if (startDate && endDate) {
-                        dateCondition = `oe.expense_date >= $${paramCount} AND oe.expense_date <= $${paramCount + 1}`;
-                        params.push(startDate, endDate);
-                        paramCount += 2;
-                    }
-                    break;
-            }
-            
-            if (dateCondition) {
-                query += ` AND ${dateCondition}`;
-            }
-        }
-
-        // Additional filters
-        if (category) {
-            query += ` AND oe.category = $${paramCount}`;
-            params.push(category);
-            paramCount++;
-        }
-
-        if (expenseType) {
-            query += ` AND oe.expense_type ILIKE $${paramCount}`;
-            params.push(`%${expenseType}%`);
-            paramCount++;
-        }
-
-        if (paymentMethod) {
-            query += ` AND oe.payment_method = $${paramCount}`;
-            params.push(paymentMethod);
-            paramCount++;
-        }
 
         // Get total count for pagination
-        const countQuery = `SELECT COUNT(*) FROM (${query}) as count_query`;
+        const countQuery = `SELECT COUNT(*) FROM operating_expenses oe WHERE 1=1 ${where}`;
         const countResult = await db.query(countQuery, params);
         const totalCount = parseInt(countResult.rows[0].count);
 
-        // Add ordering and pagination
-        query += ` ORDER BY oe.expense_date DESC, oe.created_at DESC`;
-        
-        const offset = (page - 1) * limit;
-        query += ` LIMIT $${paramCount} OFFSET $${paramCount + 1}`;
-        params.push(parseInt(limit), offset);
-
-        const result = await db.query(query, params);
-
-        // Get summary statistics
+        // Summary statistics — uses the SAME parameterized conditions (SQL-injection safe)
         const summaryQuery = `
             SELECT 
                 COUNT(*) as total_expenses,
-                SUM(amount) as total_amount,
-                AVG(amount) as average_amount,
-                MIN(amount) as min_amount,
-                MAX(amount) as max_amount
+                COALESCE(SUM(amount), 0) as total_amount,
+                COALESCE(AVG(amount), 0) as average_amount,
+                COALESCE(MIN(amount), 0) as min_amount,
+                COALESCE(MAX(amount), 0) as max_amount
             FROM operating_expenses oe
-            WHERE 1=1
-            ${category ? ` AND oe.category = '${category}'` : ''}
-            ${expenseType ? ` AND oe.expense_type ILIKE '%${expenseType}%'` : ''}
+            WHERE 1=1 ${where}
         `;
+        const summaryResult = await db.query(summaryQuery, params);
 
-        const summaryResult = await db.query(summaryQuery);
+        // Category breakdown for the same filtered set (drives KPI cards/charts)
+        const breakdownQuery = `
+            SELECT category, expense_type, COUNT(*) as count, SUM(amount) as total
+            FROM operating_expenses oe
+            WHERE 1=1 ${where}
+            GROUP BY category, expense_type
+            ORDER BY total DESC
+        `;
+        const breakdownResult = await db.query(breakdownQuery, params);
+
+        // Add ordering and pagination
+        query += ` ORDER BY oe.expense_date DESC, oe.created_at DESC`;
+        const offset = (page - 1) * limit;
+        query += ` LIMIT $${paramCount} OFFSET $${paramCount + 1}`;
+        const listParams = [...params, parseInt(limit), offset];
+
+        const result = await db.query(query, listParams);
 
         res.status(200).json({
             expenses: result.rows,
@@ -119,7 +138,8 @@ router.get('/', async (req, res) => {
                 totalCount,
                 totalPages: Math.ceil(totalCount / limit)
             },
-            summary: summaryResult.rows[0]
+            summary: summaryResult.rows[0],
+            breakdown: breakdownResult.rows
         });
 
     } catch (error) {
@@ -128,13 +148,33 @@ router.get('/', async (req, res) => {
     }
 });
 
+// GET /api/operating-expenses/options - Predefined categories & types + existing ones (for dropdowns)
+router.get('/options', async (req, res) => {
+    try {
+        // Merge predefined options with any types already used in the database
+        const existing = await db.query(`
+            SELECT DISTINCT category, expense_type FROM operating_expenses ORDER BY category, expense_type
+        `);
+        const merged = JSON.parse(JSON.stringify(EXPENSE_CATEGORIES));
+        for (const row of existing.rows) {
+            if (!row.category || !row.expense_type) continue;
+            if (!merged[row.category]) merged[row.category] = [];
+            if (!merged[row.category].includes(row.expense_type)) merged[row.category].push(row.expense_type);
+        }
+        res.status(200).json(merged);
+    } catch (error) {
+        console.error('Error fetching expense options:', error);
+        res.status(500).json({ error: 'Failed to fetch expense options.', details: error.message });
+    }
+});
+
 // GET /api/operating-expenses/summary - Get expense summary by period
 router.get('/summary', async (req, res) => {
     try {
         const { period = 'monthly', year = new Date().getFullYear() } = req.query;
 
-        let groupByClause = '';
-        let dateFormat = '';
+        let groupByClause;
+        let dateFormat;
 
         switch (period) {
             case 'daily':
@@ -145,20 +185,21 @@ router.get('/summary', async (req, res) => {
                 groupByClause = `DATE_TRUNC('week', expense_date)`;
                 dateFormat = 'YYYY-"W"WW';
                 break;
-            case 'monthly':
-                groupByClause = `DATE_TRUNC('month', expense_date)`;
-                dateFormat = 'YYYY-MM';
-                break;
             case 'yearly':
                 groupByClause = `DATE_TRUNC('year', expense_date)`;
                 dateFormat = 'YYYY';
+                break;
+            case 'monthly':
+            default:
+                groupByClause = `DATE_TRUNC('month', expense_date)`;
+                dateFormat = 'YYYY-MM';
                 break;
         }
 
         const query = `
             SELECT 
                 ${groupByClause} as period,
-                TO_CHAR(${groupByClause}, '${dateFormat}') as period_label,
+                TO_CHAR(${groupByClause}, $2) as period_label,
                 COUNT(*) as expense_count,
                 SUM(amount) as total_amount,
                 category,
@@ -169,7 +210,7 @@ router.get('/summary', async (req, res) => {
             ORDER BY period DESC, total_amount DESC
         `;
 
-        const result = await db.query(query, [year]);
+        const result = await db.query(query, [year, dateFormat]);
         res.status(200).json(result.rows);
 
     } catch (error) {
@@ -286,7 +327,7 @@ router.put('/:id', async (req, res) => {
     } = req.body;
 
     try {
-        // First, check if the expense exists and belongs to the user (optional security)
+        // First, check if the expense exists
         const existingExpense = await db.query(
             'SELECT * FROM operating_expenses WHERE id = $1',
             [id]
