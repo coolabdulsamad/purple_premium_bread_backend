@@ -28,7 +28,9 @@ async function getDefaultAccountId(paymentMethod) {
 
 // opts: { client?, account_id?, direction: 'IN'|'OUT', amount, category,
 //         reference_type?, reference_id?, transfer_pair_id?, description?,
-//         payment_method?, transaction_date?, recorded_by?, approval_request_id? }
+//         payment_method?, transaction_date?, recorded_by?,
+//         approval_request_id? | approval_id? }
+// (callers may pass the approval link under either key; both are honoured)
 async function recordMoneyTransaction(opts = {}) {
     try {
         if (!(await moneyReady())) return null;
@@ -52,7 +54,8 @@ async function recordMoneyTransaction(opts = {}) {
                     opts.reference_type || null, opts.reference_id || null,
                     opts.transfer_pair_id || null, opts.description || null,
                     opts.payment_method || null, opts.transaction_date || null,
-                    opts.recorded_by || null, opts.approval_request_id || null
+                    opts.recorded_by || null,
+                    opts.approval_request_id || opts.approval_id || null
                 ]
             );
             await client.query(

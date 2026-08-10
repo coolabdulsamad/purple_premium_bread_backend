@@ -444,9 +444,11 @@ router.post('/process', async (req, res) => {
         }
 
         // --- STEP 9d: Money management — record real money received at sale time ---
-        // Wallet portions are NOT recorded here (counted at deposit time);
-        // Credit portions are NOT money. Fail-open: no-op until money migration exists.
-        if (realMoneyPaid > 0 && paymentMethod !== 'Credit') {
+        // Wallet portions are NOT recorded here (counted at deposit time).
+        // Credit sales: only the upfront real-money portion is recorded here;
+        // the balance is recorded later by the payments routes when settled.
+        // Fail-open: no-op until money migration exists.
+        if (realMoneyPaid > 0) {
             if (splits.length > 0) {
                 for (const split of splits) {
                     if ((split.payment_method || '').toLowerCase() === 'credit') continue;
@@ -462,7 +464,7 @@ router.post('/process', async (req, res) => {
                         recorded_by: cashierId || null
                     });
                 }
-            } else {
+            } else if (paymentMethod !== 'Credit') {
                 await recordMoneyTransaction({
                     client,
                     direction: 'IN',
@@ -472,6 +474,19 @@ router.post('/process', async (req, res) => {
                     reference_id: saleId,
                     description: `Sale #${saleId} payment (${paymentMethod})`,
                     payment_method: paymentMethod,
+                    recorded_by: cashierId || null
+                });
+            } else {
+                // Credit sale with an upfront cash/bank part-payment
+                await recordMoneyTransaction({
+                    client,
+                    direction: 'IN',
+                    amount: realMoneyPaid,
+                    category: 'sale_payment',
+                    reference_type: 'sale',
+                    reference_id: saleId,
+                    description: `Sale #${saleId} upfront payment on credit sale`,
+                    payment_method: 'Cash',
                     recorded_by: cashierId || null
                 });
             }
