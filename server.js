@@ -1,4 +1,3 @@
-
 // purple-premium-bread-api/server.js
 require('dotenv').config();
 const express = require('express');
@@ -44,6 +43,8 @@ const { auditMiddleware } = require('./utils/audit');
 const permissionsRoutes = require('./routes/permissions');
 const approvalsRoutes = require('./routes/approvals');
 const moneyRoutes = require('./routes/money');
+const returnsRoutes = require('./routes/returns');
+const walletsRoutes = require('./routes/wallets');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -101,6 +102,8 @@ app.use('/api/riders', riderRoutes);
 app.use('/api/permissions', permissionsRoutes);
 app.use('/api/approvals', approvalsRoutes);
 app.use('/api/money', moneyRoutes);
+app.use('/api/returns', returnsRoutes);
+app.use('/api/wallets', walletsRoutes);
 
 // Simple test route
 app.get('/', (req, res) => {

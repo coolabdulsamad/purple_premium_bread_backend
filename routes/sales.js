@@ -6,9 +6,11 @@ const FormData = require('form-data');
 const fs = require('fs');
 const path = require('path');
 const { jwtDecode } = require('jwt-decode'); // For getting user ID from token if needed for other sales routes
+const { recordMoneyTransaction } = require('../utils/money');
+const { ensureWalletSchema, ensureSplitsSchema } = require('../utils/schemaGuards');
 
-// Configure your ImgBB API Key here
-const IMGBB_API_KEY = '77c9bd669b4a5491c1ec247d8d79e866'; // Replace with your actual ImgBB API Key
+// ImgBB API key — configure via environment variable in production
+const IMGBB_API_KEY = process.env.IMGBB_API_KEY || '77c9bd669b4a5491c1ec247d8d79e866';
 
 // Helper to get user ID from token (if token is sent in headers)
 const getUserIdFromToken = (req) => {
@@ -75,265 +77,9 @@ router.post('/upload-receipt', async (req, res) => {
     }
 });
 
-// POST /api/sales/process - Process a sale (UPDATED with Customer Balance Update)
-// router.post('/process', async (req, res) => {
-//     const {
-//         cart, subtotal, tax, total, discountAmount,
-//         cashierId, paymentMethod, customerId, note,
-//         paymentReference, paymentImageUrl, status,
-//         amountPaid, balanceDue, dueDate,
-//         freeStock, // The free stock object from the frontend
-//         // NEW: Advantage sale fields
-//         isAdvantageSale, advantageTotal, baseSubtotal
-//     } = req.body;
-
-//     console.log('Advantage Sale Data Received:', {
-//         isAdvantageSale,
-//         advantageTotal,
-//         baseSubtotal,
-//         cartItems: cart.map(item => ({
-//             id: item.id,
-//             price: item.price,
-//             advantageAmount: item.advantageAmount,
-//             finalPrice: item.finalPrice
-//         }))
-//     });
-
-//     const client = await db.pool.connect();
-//     try {
-//         await client.query('BEGIN');
-
-//         // --- STEP 1: Determine Stock Source ---
-//         let stockTable = 'inventory';
-//         let stockCheckQuery = 'SELECT quantity FROM inventory WHERE product_id = $1 FOR UPDATE';
-//         let stockUpdateQuery = `
-//             UPDATE inventory 
-//             SET quantity = quantity - $1, last_updated = NOW() 
-//             WHERE product_id = $2 
-//             RETURNING *;
-//         `;
-
-//         const userResult = await client.query(`
-//             SELECT role, load_from_demo_stock 
-//             FROM users 
-//             WHERE id = $1
-//         `, [cashierId]);
-
-//         const user = userResult.rows[0];
-
-//         if (user && user.role === 'sales' && user.load_from_demo_stock) {
-//             stockTable = 'sales_user_stock';
-
-//             // ✅ FIXED: Directly lock sales_user_stock (no LEFT JOIN)
-//             stockCheckQuery = `
-//                 SELECT quantity 
-//                 FROM sales_user_stock 
-//                 WHERE product_id = $1 AND user_id = $2 
-//                 FOR UPDATE;
-//             `;
-
-//             stockUpdateQuery = `
-//                 UPDATE sales_user_stock 
-//                 SET quantity = quantity - $1, last_updated = NOW() 
-//                 WHERE product_id = $2 AND user_id = $3
-//                 RETURNING *;
-//             `;
-//         }
-
-//         // --- STEP 2: Aggregate All Products (Sold + Free) and Pre-check Stock ---
-//         const productsToUpdate = {};
-//         let totalCogs = 0;
-
-//         // Add sold items
-//         for (const item of cart) {
-//             const productId = item.id;
-//             const quantity = item.quantity;
-//             productsToUpdate[productId] = (productsToUpdate[productId] || 0) + quantity;
-
-//             // Calculate COGS for sold items
-//             const cogsPerUnit = await calculateProductCogs(productId, client);
-//             totalCogs += cogsPerUnit * quantity;
-//         }
-
-//         const totalProfit = total - totalCogs;
-
-//         // Add free items (if applicable)
-//         if (freeStock && freeStock.quantities) {
-//             for (const [productIdStr, freeQty] of Object.entries(freeStock.quantities)) {
-//                 const productId = parseInt(productIdStr);
-//                 if (freeQty > 0) {
-//                     productsToUpdate[productId] = (productsToUpdate[productId] || 0) + freeQty;
-//                 }
-//             }
-//         }
-
-//         // --- STEP 3: Final Stock Check (Locking Safely) ---
-//         for (const [productId, quantityToDeduct] of Object.entries(productsToUpdate)) {
-//             let checkParams = [productId];
-//             if (stockTable === 'sales_user_stock') {
-//                 checkParams.push(cashierId);
-//             }
-
-//             const checkResult = await client.query(stockCheckQuery, checkParams);
-//             const availableStock = checkResult.rows[0]?.quantity || 0;
-
-//             if (quantityToDeduct > availableStock) {
-//                 const product = await client.query('SELECT name FROM products WHERE id = $1', [productId]);
-//                 const productName = product.rows[0]?.name || `Product ID ${productId}`;
-//                 throw new Error(
-//                     `Insufficient stock for ${productName} in ${stockTable}. Needed: ${quantityToDeduct}, Available: ${availableStock}`
-//                 );
-//             }
-//         }
-
-// // --- STEP 4: UPDATE CUSTOMER BALANCE IF CREDIT SALE ---
-// if (customerId && paymentMethod === 'Credit' && balanceDue > 0) {
-//   console.log(`Updating customer ${customerId} balance by ${balanceDue} (remaining amount)`);
-
-//   const updateCustomerBalanceQuery = `
-//     UPDATE customers 
-//     SET balance = balance + $1, updated_at = NOW() 
-//     WHERE id = $2
-//     RETURNING *;
-//   `;
-
-//   const customerUpdateResult = await client.query(updateCustomerBalanceQuery, [balanceDue, customerId]);
-
-//   if (customerUpdateResult.rowCount === 0) {
-//     throw new Error('Customer not found when updating balance');
-//   }
-
-//   console.log('Customer balance updated successfully:', customerUpdateResult.rows[0]);
-// } else if (customerId && paymentMethod === 'Credit' && balanceDue === 0) {
-//   console.log(`Credit sale with full payment - no balance to update for customer ${customerId}`);
-// }
-
-//         // --- STEP 5: Record the Sale ---
-//         const saleInsertQuery = `
-//             INSERT INTO sales_transactions (
-//                 subtotal, tax_amount, total_amount, discount_amount, cashier_id, 
-//                 payment_method, customer_id, note, payment_reference, 
-//                 payment_image_url, status, amount_paid, balance_due, due_date, 
-//                 total_cogs, total_profit, stock_source, stock_source_user_id,
-//                 is_advantage_sale, advantage_total, base_subtotal
-//             )
-//             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 
-//                     $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) 
-//             RETURNING id;
-//         `;
-
-//         // Determine stock source
-//         let stockSource = 'main_inventory';
-//         let stockSourceUserId = null;
-
-//         if (user && user.role === 'sales' && user.load_from_demo_stock) {
-//             stockSource = 'user_stock';
-//             stockSourceUserId = cashierId;
-//         }
-
-//         const saleResult = await client.query(saleInsertQuery, [
-//             subtotal, tax, total, discountAmount, cashierId,
-//             paymentMethod, customerId, note, paymentReference,
-//             paymentImageUrl, status, amountPaid, balanceDue, dueDate,
-//             totalCogs, totalProfit, stockSource, stockSourceUserId,
-//             // NEW: Advantage sale parameters
-//             isAdvantageSale || false,
-//             advantageTotal || 0,
-//             baseSubtotal || subtotal
-//         ]);
-//         const saleId = saleResult.rows[0].id;
-
-//         // --- STEP 6: Record Sale Items ---
-//         const itemsInsertQuery = `
-//             INSERT INTO sales_items (
-//                 sale_id, product_id, quantity, price_at_sale, discount_applied,
-//                 advantage_amount, final_price
-//             )
-//             VALUES ($1, $2, $3, $4, $5, $6, $7);
-//         `;
-
-//         // Get discount percentage
-//         let discountPercent = 0;
-//         if (discountAmount && subtotal > 0) {
-//             discountPercent = (discountAmount / subtotal) * 100;
-//         }
-
-//         for (const item of cart) {
-//             // Extract advantage amount and final price from item data
-//             const advantageAmount = item.advantageAmount || 0;
-//             const finalPrice = item.finalPrice || item.price;
-//             const basePrice = item.price; // Original price
-
-//             await client.query(itemsInsertQuery, [
-//                 saleId,
-//                 item.id,
-//                 item.quantity,
-//                 basePrice, // Original base price
-//                 discountPercent.toFixed(2),
-//                 advantageAmount, // Extra amount added for advantage sale
-//                 finalPrice // Final price charged (base price + advantage amount)
-//             ]);
-//         }
-
-//         // --- STEP 7: Deduct Stock ---
-//         for (const [productId, quantityToDeduct] of Object.entries(productsToUpdate)) {
-//             let updateParams = [quantityToDeduct, productId];
-//             if (stockTable === 'sales_user_stock') {
-//                 updateParams.push(cashierId);
-//             }
-
-//             const updateResult = await client.query(stockUpdateQuery, updateParams);
-
-//             if (updateResult.rowCount === 0 && stockTable === 'sales_user_stock') {
-//                 const insertQuery = `
-//                     INSERT INTO sales_user_stock (user_id, product_id, quantity)
-//                     VALUES ($1, $2, -($3))
-//                     ON CONFLICT (user_id, product_id) DO UPDATE
-//                     SET quantity = sales_user_stock.quantity - EXCLUDED.quantity
-//                     RETURNING *;
-//                 `;
-//                 await client.query(insertQuery, [cashierId, productId, quantityToDeduct]);
-//             }
-//         }
-
-//         // --- STEP 8: Log Free Stock ---
-//         if (freeStock && freeStock.quantities) {
-//             const { quantities, reason } = freeStock;
-//             const logQuery = `
-//                 INSERT INTO free_stock_log (sale_id, product_id, quantity, reason, recorded_by)
-//                 VALUES ($1, $2, $3, $4, $5);
-//             `;
-
-//             for (const [productIdStr, quantity] of Object.entries(quantities)) {
-//                 const productId = parseInt(productIdStr);
-//                 if (quantity > 0) {
-//                     await client.query(logQuery, [saleId, productId, quantity, reason, cashierId]);
-
-//                     if (stockTable !== 'sales_user_stock') {
-//                         await client.query(
-//                             `UPDATE inventory
-//                              SET quantity = quantity - $1, last_updated = NOW()
-//                              WHERE product_id = $2;`,
-//                             [quantity, productId]
-//                         );
-//                     }
-//                 }
-//             }
-//         }
-
-//         await client.query('COMMIT');
-//         res.status(201).json({ message: 'Sale processed successfully', saleId });
-
-//     } catch (error) {
-//         await client.query('ROLLBACK');
-//         console.error('Sale Processing Error:', error.message);
-//         res.status(500).json({ error: 'Failed to process sale.', details: error.message });
-//     } finally {
-//         client.release();
-//     }
-// });
-
-// POST /api/sales/process - Process a sale (UPDATED with Customer Balance Update and Rider Support)
+// POST /api/sales/process - Process a sale
+// Supports: customer sales, rider sales, advantage sales, free stock,
+// split payment methods (paymentSplits) and advance-wallet funding (walletAmountUsed).
 router.post('/process', async (req, res) => {
     const {
         cart, subtotal, tax, total, discountAmount,
@@ -343,23 +89,43 @@ router.post('/process', async (req, res) => {
         freeStock, // The free stock object from the frontend
         // Advantage sale fields
         isAdvantageSale, advantageTotal, baseSubtotal,
-        // Rider sale fields - NEW
-        isRiderSale, riderId
+        // Rider sale fields
+        isRiderSale, riderId,
+        // Phase 5: split payments + advance wallet usage
+        paymentSplits, walletAmountUsed
     } = req.body;
 
-    console.log('Sale Data Received:', {
-        isAdvantageSale,
-        advantageTotal,
-        baseSubtotal,
-        isRiderSale,
-        riderId,
-        cartItems: cart.map(item => ({
-            id: item.id,
-            price: item.price,
-            advantageAmount: item.advantageAmount,
-            finalPrice: item.finalPrice
-        }))
-    });
+    const round2 = (v) => Math.round((parseFloat(v) || 0) * 100) / 100;
+    const walletUsed = round2(walletAmountUsed);
+    const splits = Array.isArray(paymentSplits)
+        ? paymentSplits.filter(s => s && round2(s.amount) > 0 && s.payment_method)
+        : [];
+
+    // Contract: amountPaid INCLUDES any wallet-funded portion.
+    // paymentSplits break down only the real-money portion (amountPaid - walletUsed).
+    const realMoneyPaid = round2(amountPaid - walletUsed);
+    if (walletUsed < 0 || realMoneyPaid < -0.004) {
+        return res.status(400).json({ error: 'walletAmountUsed cannot exceed amountPaid.' });
+    }
+    if (splits.length > 0) {
+        const splitTotal = round2(splits.reduce((s, x) => s + round2(x.amount), 0));
+        if (Math.abs(splitTotal - realMoneyPaid) > 0.01) {
+            return res.status(400).json({
+                error: `Split payments (₦${splitTotal.toLocaleString()}) must add up to the amount paid excluding wallet (₦${realMoneyPaid.toLocaleString()}).`
+            });
+        }
+        if (!(await ensureSplitsSchema())) {
+            return res.status(503).json({ error: 'Split payments unavailable: migration 003 has not been applied yet.' });
+        }
+    }
+    if (walletUsed > 0) {
+        if (!(await ensureWalletSchema())) {
+            return res.status(503).json({ error: 'Advance wallet unavailable: migration 002 has not been applied yet.' });
+        }
+        if (isRiderSale ? !riderId : !customerId) {
+            return res.status(400).json({ error: 'A customer or rider is required to use advance wallet balance.' });
+        }
+    }
 
     const client = await db.pool.connect();
     try {
@@ -507,8 +273,6 @@ router.post('/process', async (req, res) => {
 
             console.log('Rider balance updated successfully:', riderUpdateResult.rows[0]);
 
-            // REMOVED: The customer balance update section that was here
-
         } else if (isRiderSale && riderId && paymentMethod === 'Credit' && balanceDue === 0) {
             console.log(`Rider credit sale with full payment - no balance to update for rider ${riderId}`);
         }
@@ -631,6 +395,88 @@ router.post('/process', async (req, res) => {
             }
         }
 
+        // --- STEP 9b: Advance wallet funding (wallet portion of amountPaid) ---
+        if (walletUsed > 0) {
+            const walletOwnerType = isRiderSale && riderId ? 'RIDER' : 'CUSTOMER';
+            const walletOwnerId = isRiderSale && riderId ? riderId : customerId;
+            const ownerTable = walletOwnerType === 'RIDER' ? 'riders' : 'customers';
+
+            const ownerLock = await client.query(
+                `SELECT COALESCE(advance_balance, 0) AS advance_balance FROM ${ownerTable} WHERE id = $1 FOR UPDATE`,
+                [walletOwnerId]
+            );
+            if (ownerLock.rows.length === 0) {
+                throw new Error(`${walletOwnerType === 'RIDER' ? 'Rider' : 'Customer'} not found for wallet usage.`);
+            }
+            const available = parseFloat(ownerLock.rows[0].advance_balance);
+            if (walletUsed > available + 0.004) {
+                throw new Error(`Insufficient advance wallet balance. Available: ₦${available.toLocaleString()}, requested: ₦${walletUsed.toLocaleString()}.`);
+            }
+
+            const walletUpdate = await client.query(
+                `UPDATE ${ownerTable} SET advance_balance = advance_balance - $1 WHERE id = $2 RETURNING advance_balance`,
+                [walletUsed, walletOwnerId]
+            );
+            await client.query(
+                `INSERT INTO wallet_transactions
+                    (owner_type, owner_id, transaction_type, amount, balance_after,
+                     reference_type, reference_id, notes, created_by)
+                 VALUES ($1, $2, 'USAGE', $3, $4, 'sale', $5, $6, $7)`,
+                [
+                    walletOwnerType, walletOwnerId, walletUsed,
+                    walletUpdate.rows[0].advance_balance,
+                    saleId,
+                    `Advance wallet used on sale #${saleId}`,
+                    cashierId || null
+                ]
+            );
+        }
+
+        // --- STEP 9c: Split payment records ---
+        if (splits.length > 0) {
+            for (const split of splits) {
+                await client.query(
+                    `INSERT INTO sale_payment_splits (sale_id, payment_method, amount)
+                     VALUES ($1, $2, $3)`,
+                    [saleId, split.payment_method, round2(split.amount)]
+                );
+            }
+        }
+
+        // --- STEP 9d: Money management — record real money received at sale time ---
+        // Wallet portions are NOT recorded here (counted at deposit time);
+        // Credit portions are NOT money. Fail-open: no-op until money migration exists.
+        if (realMoneyPaid > 0 && paymentMethod !== 'Credit') {
+            if (splits.length > 0) {
+                for (const split of splits) {
+                    if ((split.payment_method || '').toLowerCase() === 'credit') continue;
+                    await recordMoneyTransaction({
+                        client,
+                        direction: 'IN',
+                        amount: round2(split.amount),
+                        category: 'sale_payment',
+                        reference_type: 'sale',
+                        reference_id: saleId,
+                        description: `Sale #${saleId} payment (${split.payment_method})`,
+                        payment_method: split.payment_method,
+                        recorded_by: cashierId || null
+                    });
+                }
+            } else {
+                await recordMoneyTransaction({
+                    client,
+                    direction: 'IN',
+                    amount: realMoneyPaid,
+                    category: 'sale_payment',
+                    reference_type: 'sale',
+                    reference_id: saleId,
+                    description: `Sale #${saleId} payment (${paymentMethod})`,
+                    payment_method: paymentMethod,
+                    recorded_by: cashierId || null
+                });
+            }
+        }
+
         // --- STEP 10: If this was a rider sale, log to rider_payment_history if payment was made ---
         if (isRiderSale && riderId && amountPaid > 0) {
             // First, create a payment record
@@ -681,7 +527,9 @@ router.post('/process', async (req, res) => {
             message: 'Sale processed successfully',
             saleId,
             isRiderSale,
-            riderId: riderId || null
+            riderId: riderId || null,
+            wallet_used: walletUsed,
+            splits_recorded: splits.length
         });
 
     } catch (error) {
@@ -690,6 +538,24 @@ router.post('/process', async (req, res) => {
         res.status(500).json({ error: 'Failed to process sale.', details: error.message });
     } finally {
         client.release();
+    }
+});
+
+// GET /api/sales/splits/:saleId - Get the split payment breakdown for a sale
+router.get('/splits/:saleId', async (req, res) => {
+    try {
+        if (!(await ensureSplitsSchema())) {
+            return res.status(200).json([]); // feature not migrated yet: no splits exist
+        }
+        const result = await db.query(
+            `SELECT id, sale_id, payment_method, amount, created_at
+             FROM sale_payment_splits WHERE sale_id = $1 ORDER BY id`,
+            [req.params.saleId]
+        );
+        res.status(200).json(result.rows);
+    } catch (error) {
+        console.error('Error fetching sale payment splits:', error);
+        res.status(500).json({ error: 'Failed to fetch payment splits.', details: error.message });
     }
 });
 
@@ -861,7 +727,6 @@ router.get('/', async (req, res) => {
 });
 
 // GET /api/sales/customer/:customerId/outstanding - Fetch outstanding credit sales for a customer
-// This endpoint was provided in the previous step, included here for completeness
 router.get('/customer/:customerId/outstanding', async (req, res) => {
     const { customerId } = req.params;
     try {
@@ -1062,6 +927,20 @@ router.get('/details/:id', async (req, res) => {
             free_stock_items: freeStockResult.rows
         };
 
+        // Phase 5: attach split payment breakdown when available (fail-open)
+        try {
+            if (await ensureSplitsSchema()) {
+                const splitsResult = await db.pool.query(
+                    `SELECT id, payment_method, amount, created_at
+                     FROM sale_payment_splits WHERE sale_id = $1 ORDER BY id`,
+                    [id]
+                );
+                saleDetails.payment_splits = splitsResult.rows;
+            }
+        } catch (splitErr) {
+            console.error('Failed to load payment splits (non-fatal):', splitErr.message);
+        }
+
         res.status(200).json(saleDetails);
     } catch (error) {
         console.error('Error fetching sale details:', error);
@@ -1199,7 +1078,6 @@ router.get('/rider/:riderId', async (req, res) => {
     }
 });
 
-// GET /api/sales/rider/:riderId/outstanding - Get outstanding balance for rider
 // GET /api/sales/rider/:riderId/outstanding - Get outstanding balance for rider
 router.get('/rider/:riderId/outstanding', async (req, res) => {
     const { riderId } = req.params;
