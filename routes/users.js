@@ -1,22 +1,3 @@
-// const express = require('express');
-// const router = express.Router();
-// const db = require('../db/db');
-
-// // GET /api/users - Fetch a list of all users
-// router.get('/', async (req, res) => {
-//     try {
-//         const result = await db.query(
-//             'SELECT id, username, fullname, role, created_at FROM users ORDER BY fullname ASC'
-//         );
-//         res.status(200).json(result.rows);
-//     } catch (error) {
-//         res.status(500).json({ error: error.message });
-//     }
-// });
-
-// module.exports = router;
-
-
 // purple-premium-bread-api/routes/users.js
 const express = require('express');
 const router = express.Router();
@@ -26,12 +7,12 @@ const bcrypt = require('bcryptjs'); // For password hashing
 // Example middleware to get user from token (adjust as needed)
 const authenticate = require('../middleware/authenticate');
 
-// GET /api/users - Fetch all users with optional filters (role, search term)
+// GET /api/users - Fetch all users with optional filters (role, search term, active)
 router.get('/', async (req, res) => {
-    const { role, searchTerm } = req.query; // Filters from frontend
+    const { role, searchTerm, activeOnly } = req.query; // Filters from frontend
     let query = `
         SELECT 
-            id, fullname, username, email, phone_number, gender, role, created_at, updated_at
+            id, fullname, username, email, phone_number, gender, role, is_active, load_from_demo_stock, created_at, updated_at
         FROM users
         WHERE 1=1
     `;
@@ -49,21 +30,14 @@ router.get('/', async (req, res) => {
         params.push(`%${searchTerm}%`); // % for partial matching
         paramIndex++;
     }
+    // Optionally restrict to active users (used by dropdowns)
+    if (activeOnly === 'true') {
+        query += ` AND is_active = true`;
+    }
     query += ` ORDER BY fullname ASC`; // Order results
 
     try {
         const result = await db.query(query, params);
-        res.status(200).json(result.rows);
-    } catch (error) {
-        console.error('Error fetching users:', error);
-        res.status(500).json({ error: 'Failed to fetch users.', details: error.message });
-    }
-});
-
-// GET /api/users - Get all users (for dropdowns and names)
-router.get('/', async (req, res) => {
-    try {
-        const result = await db.pool.query('SELECT id, username, fullname, email, role FROM users WHERE is_active = true ORDER BY fullname ASC');
         res.status(200).json(result.rows);
     } catch (error) {
         console.error('Error fetching users:', error);
@@ -98,7 +72,7 @@ router.post('/', async (req, res) => {
 // PUT /api/users/:id - Update an existing user
 router.put('/:id', async (req, res) => {
     const { id } = req.params;
-    const { username, password, role, fullname, email, phone_number, gender } = req.body;
+    const { username, password, role, fullname, email, phone_number, gender, is_active } = req.body;
 
     let query = `
         UPDATE users
@@ -119,9 +93,14 @@ router.put('/:id', async (req, res) => {
         query += `, username = $${paramIndex++}`;
         params.push(username);
     }
+    // Allow toggling active status
+    if (typeof is_active === 'boolean') {
+        query += `, is_active = $${paramIndex++}`;
+        params.push(is_active);
+    }
 
     query += ` WHERE id = $${paramIndex}
-               RETURNING id, fullname, username, email, phone_number, gender, role, updated_at`;
+               RETURNING id, fullname, username, email, phone_number, gender, role, is_active, updated_at`;
     params.push(id); // The ID for the WHERE clause
 
     try {
@@ -171,7 +150,7 @@ router.get('/me', authenticate, async (req, res) => {
     }
 });
 
-// NEW: GET /api/users/sales-accounts - Fetch all sales users and their allocated stock
+// GET /api/users/sales-accounts - Fetch all sales users and their allocated stock
 router.get('/sales-accounts', async (req, res) => {
     try {
         const query = `
@@ -206,7 +185,7 @@ router.get('/sales-accounts', async (req, res) => {
     }
 });
 
-// NEW: PUT /api/users/toggle-demo-stock/:userId - Toggle the load_from_demo_stock flag
+// PUT /api/users/toggle-demo-stock/:userId - Toggle the load_from_demo_stock flag
 router.put('/toggle-demo-stock/:userId', async (req, res) => {
     const { userId } = req.params;
     const { load_from_demo_stock } = req.body; // Expect a boolean: true or false
@@ -226,7 +205,7 @@ router.put('/toggle-demo-stock/:userId', async (req, res) => {
     }
 });
 
-// Updated: GET /api/users - Get all users AND staff members for duty assignments
+// GET /api/users/for-duties - Get all users AND staff members for duty assignments
 router.get('/for-duties', async (req, res) => {
     try {
         // Get system users

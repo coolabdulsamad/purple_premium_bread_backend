@@ -1,6 +1,5 @@
 const jwt = require('jsonwebtoken');
-
-const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret'; // Use your real secret in production
+const config = require('../config');
 
 module.exports = function authenticate(req, res, next) {
     const authHeader = req.headers['authorization'];
@@ -12,7 +11,7 @@ module.exports = function authenticate(req, res, next) {
         return res.status(401).json({ error: 'Malformed token.' });
     }
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, config.JWT_SECRET);
         req.user = decoded; // decoded should have user info (e.g., id)
         next();
     } catch (err) {
