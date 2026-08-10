@@ -1,6 +1,6 @@
 // db/migrate.js — Migration runner for Purple Premium Bread
 // Runs all files in db/migrations/ in filename order, tracking applied
--- migrations in the schema_migrations table. Safe to run repeatedly.
+// migrations in the schema_migrations table. Safe to run repeatedly.
 //
 // Usage:  node db/migrate.js
 require('dotenv').config();
