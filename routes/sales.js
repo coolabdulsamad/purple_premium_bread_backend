@@ -581,7 +581,7 @@ router.get('/', async (req, res) => {
             search, startDate, endDate, transactionType, paymentMethod,
             status, customerId, stockSource, hasFreeStock, discountRange,
             saleType, hasReceipt, hasReference, advantageRange,
-            isRiderSale, riderId  // Add these new params
+            isRiderSale, riderId, cashierId  // Rider + cashier (staff) filters
         } = req.query;
 
         let query = `
@@ -717,6 +717,13 @@ router.get('/', async (req, res) => {
         if (riderId) {
             query += ` AND st.rider_id = $${paramCount}`;
             params.push(riderId);
+            paramCount++;
+        }
+
+        // Filter by cashier (staff who recorded the sale)
+        if (cashierId) {
+            query += ` AND st.cashier_id = $${paramCount}`;
+            params.push(cashierId);
             paramCount++;
         }
 
