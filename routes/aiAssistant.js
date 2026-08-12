@@ -6,7 +6,7 @@
 // ONLINE mode: sends the question plus a READ-ONLY data snapshot from the
 // database to an OpenAI-compatible chat API. Configuration comes from env
 // (AI_API_KEY / AI_API_BASE / AI_MODEL) or, once the Settings page saves them,
-// from the app_settings table (keys: ai_api_key / ai_api_base / ai_model).
+// from the app_settings table (keys: ai.api_key / ai.api_base / ai.model).
 //
 // OFFLINE mode: a built-in intent engine answers directly from the database —
 // no external API needed. If online mode is requested but unavailable or the
@@ -537,12 +537,14 @@ async function getAiConfig() {
         // Fall back to keys saved from the Settings page (Phase: settings).
         try {
             const r = await db.query(
-                "SELECT key, value FROM app_settings WHERE key IN ('ai_api_key', 'ai_api_base', 'ai_model')"
+                "SELECT setting_key, setting_value FROM app_settings WHERE setting_key IN ('ai.api_key', 'ai.api_base', 'ai.model')"
             );
             for (const row of r.rows) {
-                if (row.key === 'ai_api_key' && row.value) cfg.apiKey = row.value;
-                if (row.key === 'ai_api_base' && row.value) cfg.apiBase = String(row.value).replace(/\/+$/, '');
-                if (row.key === 'ai_model' && row.value) cfg.model = row.value;
+                const val = String(row.setting_value ?? '').replace(/^"|"$/g, '').trim();
+                if (!val) continue;
+                if (row.setting_key === 'ai.api_key') cfg.apiKey = val;
+                if (row.setting_key === 'ai.api_base') cfg.apiBase = val.replace(/\/+$/, '');
+                if (row.setting_key === 'ai.model') cfg.model = val;
             }
         } catch (_) { /* app_settings table not installed yet — env only */ }
     }
