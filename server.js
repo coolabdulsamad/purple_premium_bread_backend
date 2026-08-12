@@ -48,6 +48,8 @@ const walletsRoutes = require('./routes/wallets');
 const aiAssistantRoutes = require('./routes/aiAssistant');
 const chatRoutes = require('./routes/chat');
 const whatsappRoutes = require('./routes/whatsapp');
+const settingsRoutes = require('./routes/settings');
+const auditLogsRoutes = require('./routes/auditLogs');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -114,6 +116,8 @@ app.use('/api/returns', returnsRoutes);
 app.use('/api/wallets', walletsRoutes);
 app.use('/api/ai', aiAssistantRoutes);
 app.use('/api/chat', chatRoutes);
+app.use('/api/settings', settingsRoutes);
+app.use('/api/audit-logs', auditLogsRoutes);
 
 // Simple test route
 app.get('/', (req, res) => {
