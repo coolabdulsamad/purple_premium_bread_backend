@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db/db');
 const config = require('../config');
+const { ensureReturnsSchema, ensureWalletSchema, ensureSplitsSchema } = require('../utils/schemaGuards');
 
 // Helper function to apply date filters and return the WHERE clause part and new parameters
 const applyDateFilters = (baseQuery, baseParams, initialParamIndex, startDate, endDate, dateColumn = 'created_at') => {
@@ -97,6 +98,29 @@ router.get('/profit-loss', async (req, res) => {
         const salariesResult = await db.query(salariesQuery, salariesParams);
         const totalSalaries = parseFloat(salariesResult.rows[0].total_salaries);
 
+        // Phase 7: sales returns in the period (informational — recorded sales figures above are unchanged).
+        // Fail-open: returns feature requires migration 003.
+        let totalReturns = 0;
+        try {
+            if (await ensureReturnsSchema()) {
+                let returnsQuery = `
+                    SELECT COALESCE(SUM(total_amount), 0) AS total_returns
+                    FROM sales_returns
+                    WHERE 1=1
+                `;
+                let returnsParams = [];
+                let returnsParamIndex = 1;
+
+                ({ query: returnsQuery, params: returnsParams, paramIndex: returnsParamIndex } =
+                    applyDateFilters(returnsQuery, returnsParams, returnsParamIndex, startDate, endDate, 'return_date'));
+
+                const returnsResult = await db.query(returnsQuery, returnsParams);
+                totalReturns = parseFloat(returnsResult.rows[0].total_returns);
+            }
+        } catch (returnsError) {
+            console.error('P&L: failed to load returns total (non-fatal):', returnsError.message);
+        }
+
         // Calculate taxable income and tax
         const grossProfit = parseFloat(total_revenue) - parseFloat(total_cogs);
         const totalExpenses = totalOperatingExpenses + totalSalaries;
@@ -117,6 +141,8 @@ router.get('/profit-loss', async (req, res) => {
                 totalAdvantageSales: parseFloat(total_advantage_sales),
                 totalRiderSales: parseFloat(total_rider_sales),
                 totalAdvantageAmount: parseFloat(total_advantage_amount),
+                totalReturns: totalReturns,
+                revenueNetOfReturns: parseFloat(total_revenue) - totalReturns,
                 totalCostOfGoodsSold: parseFloat(total_cogs),
                 grossProfit: grossProfit,
                 totalOperatingExpenses: totalOperatingExpenses,
@@ -1483,6 +1509,252 @@ router.get('/rider-sales-summary', async (req, res) => {
     } catch (error) {
         console.error('Error generating rider sales summary:', error);
         res.status(500).json({ error: 'Failed to generate rider sales summary.', details: error.message });
+    }
+});
+
+// ============================================================
+// Phase 7: Reports for Phase-5 features (returns, split payments, wallets).
+// Each endpoint degrades to a clear 503 until its backing migration is applied.
+// ============================================================
+
+// Sales Returns Report
+router.get('/returns', async (req, res) => {
+    if (!(await ensureReturnsSchema())) {
+        return res.status(503).json({ error: 'Returns report unavailable: migration 003 has not been applied yet.' });
+    }
+    const { startDate, endDate, customerId, riderId, refundMethod } = req.query;
+
+    let query = `
+        SELECT
+            sr.id AS return_id,
+            sr.sale_id,
+            sr.return_date,
+            c.fullname AS customer_name,
+            r.fullname AS rider_name,
+            CASE WHEN sr.rider_id IS NOT NULL THEN 'Rider' ELSE 'Customer' END AS owner_type,
+            COALESCE(c.fullname, r.fullname, 'Walk-in Customer') AS owner_name,
+            sr.refund_method,
+            sr.total_amount,
+            sr.credit_applied,
+            sr.wallet_credited,
+            sr.cash_refunded,
+            sr.reason,
+            u.fullname AS processed_by_name,
+            COALESCE((
+                SELECT string_agg(p.name || ' (x' || sri.quantity || ')', ', ' ORDER BY sri.id)
+                FROM sales_return_items sri
+                LEFT JOIN products p ON sri.product_id = p.id
+                WHERE sri.return_id = sr.id
+            ), '') AS items_summary,
+            COALESCE((
+                SELECT SUM(sri.quantity)
+                FROM sales_return_items sri
+                WHERE sri.return_id = sr.id
+            ), 0) AS total_quantity
+        FROM sales_returns sr
+        LEFT JOIN customers c ON sr.customer_id = c.id
+        LEFT JOIN riders r ON sr.rider_id = r.id
+        LEFT JOIN users u ON sr.processed_by = u.id
+        WHERE 1=1
+    `;
+    let params = [];
+    let paramIndex = 1;
+
+    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'sr.return_date'));
+
+    if (customerId) {
+        query += ` AND sr.customer_id = $${paramIndex++}`;
+        params.push(parseInt(customerId));
+    }
+    if (riderId) {
+        query += ` AND sr.rider_id = $${paramIndex++}`;
+        params.push(parseInt(riderId));
+    }
+    if (refundMethod) {
+        query += ` AND sr.refund_method = $${paramIndex++}`;
+        params.push(refundMethod);
+    }
+
+    query += ` ORDER BY sr.return_date DESC;`;
+
+    try {
+        const result = await db.query(query, params);
+
+        const summary = {
+            totalReturns: result.rows.length,
+            totalQuantityReturned: result.rows.reduce((sum, row) => sum + parseFloat(row.total_quantity || 0), 0),
+            totalReturnValue: result.rows.reduce((sum, row) => sum + parseFloat(row.total_amount || 0), 0),
+            totalCreditApplied: result.rows.reduce((sum, row) => sum + parseFloat(row.credit_applied || 0), 0),
+            totalWalletCredited: result.rows.reduce((sum, row) => sum + parseFloat(row.wallet_credited || 0), 0),
+            totalCashRefunded: result.rows.reduce((sum, row) => sum + parseFloat(row.cash_refunded || 0), 0)
+        };
+
+        res.status(200).json({
+            reportTitle: 'Sales Returns Report',
+            filtersUsed: { startDate, endDate, customerId, riderId, refundMethod },
+            summary: summary,
+            reportData: result.rows
+        });
+    } catch (error) {
+        console.error('Error generating sales returns report:', error);
+        res.status(500).json({ error: 'Failed to generate sales returns report.', details: error.message });
+    }
+});
+
+// Split Payments Report
+router.get('/split-payments', async (req, res) => {
+    if (!(await ensureSplitsSchema())) {
+        return res.status(503).json({ error: 'Split payments report unavailable: migration 003 has not been applied yet.' });
+    }
+    const { startDate, endDate, paymentMethod, branchId } = req.query;
+
+    let query = `
+        SELECT
+            sps.id AS split_id,
+            sps.sale_id,
+            st.sale_date,
+            COALESCE(c.fullname, 'Walk-in Customer') AS customer_name,
+            r.fullname AS rider_name,
+            u.fullname AS cashier_name,
+            b.name AS branch_name,
+            sps.payment_method,
+            sps.amount,
+            st.total_amount AS sale_total,
+            st.status AS sale_status
+        FROM sale_payment_splits sps
+        JOIN sales_transactions st ON sps.sale_id = st.id
+        LEFT JOIN customers c ON st.customer_id = c.id
+        LEFT JOIN riders r ON st.rider_id = r.id
+        LEFT JOIN users u ON st.cashier_id = u.id
+        LEFT JOIN branches b ON st.branch_id = b.id
+        WHERE st.status != 'Cancelled'
+    `;
+    let params = [];
+    let paramIndex = 1;
+
+    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'st.sale_date'));
+
+    if (paymentMethod) {
+        query += ` AND sps.payment_method ILIKE $${paramIndex++}`;
+        params.push(`%${paymentMethod}%`);
+    }
+    if (branchId) {
+        query += ` AND st.branch_id = $${paramIndex++}`;
+        params.push(parseInt(branchId));
+    }
+
+    query += ` ORDER BY st.sale_date DESC, sps.sale_id DESC, sps.id;`;
+
+    try {
+        const result = await db.query(query, params);
+
+        const methodTotals = {};
+        result.rows.forEach(row => {
+            const method = row.payment_method || 'Unknown';
+            if (!methodTotals[method]) {
+                methodTotals[method] = { method, count: 0, amount: 0 };
+            }
+            methodTotals[method].count += 1;
+            methodTotals[method].amount += parseFloat(row.amount || 0);
+        });
+
+        const summary = {
+            totalSplits: result.rows.length,
+            salesWithSplits: new Set(result.rows.map(row => row.sale_id)).size,
+            totalSplitAmount: result.rows.reduce((sum, row) => sum + parseFloat(row.amount || 0), 0),
+            byMethod: Object.values(methodTotals).sort((a, b) => b.amount - a.amount)
+        };
+
+        res.status(200).json({
+            reportTitle: 'Split Payments Report',
+            filtersUsed: { startDate, endDate, paymentMethod, branchId },
+            summary: summary,
+            reportData: result.rows
+        });
+    } catch (error) {
+        console.error('Error generating split payments report:', error);
+        res.status(500).json({ error: 'Failed to generate split payments report.', details: error.message });
+    }
+});
+
+// Advance Wallet Transactions Report
+router.get('/wallet-transactions', async (req, res) => {
+    if (!(await ensureWalletSchema())) {
+        return res.status(503).json({ error: 'Wallet report unavailable: migration 002 has not been applied yet.' });
+    }
+    const { startDate, endDate, ownerType, walletTxnType } = req.query;
+
+    let query = `
+        SELECT
+            wt.id,
+            wt.created_at,
+            wt.owner_type,
+            COALESCE(c.fullname, r.fullname, 'Unknown') AS owner_name,
+            wt.transaction_type,
+            wt.amount,
+            wt.balance_after,
+            wt.reference_type,
+            wt.reference_id,
+            wt.notes,
+            u.fullname AS created_by_name
+        FROM wallet_transactions wt
+        LEFT JOIN customers c ON wt.owner_type = 'CUSTOMER' AND wt.owner_id = c.id
+        LEFT JOIN riders r ON wt.owner_type = 'RIDER' AND wt.owner_id = r.id
+        LEFT JOIN users u ON wt.created_by = u.id
+        WHERE 1=1
+    `;
+    let params = [];
+    let paramIndex = 1;
+
+    ({ query, params, paramIndex } = applyDateFilters(query, params, paramIndex, startDate, endDate, 'wt.created_at'));
+
+    if (ownerType) {
+        query += ` AND wt.owner_type = $${paramIndex++}`;
+        params.push(ownerType);
+    }
+    if (walletTxnType) {
+        query += ` AND wt.transaction_type = $${paramIndex++}`;
+        params.push(walletTxnType);
+    }
+
+    query += ` ORDER BY wt.created_at DESC, wt.id DESC;`;
+
+    try {
+        const result = await db.query(query, params);
+
+        const sumByType = (type) => result.rows
+            .filter(row => row.transaction_type === type)
+            .reduce((sum, row) => sum + parseFloat(row.amount || 0), 0);
+
+        // Current outstanding wallet balances (all-time, independent of date filters)
+        const balancesResult = await db.query(`
+            SELECT
+                (SELECT COALESCE(SUM(advance_balance), 0) FROM customers) AS customer_wallet_balance,
+                (SELECT COALESCE(SUM(advance_balance), 0) FROM riders) AS rider_wallet_balance
+        `);
+        const customerWalletBalance = parseFloat(balancesResult.rows[0].customer_wallet_balance);
+        const riderWalletBalance = parseFloat(balancesResult.rows[0].rider_wallet_balance);
+
+        const summary = {
+            totalTransactions: result.rows.length,
+            totalDeposits: sumByType('DEPOSIT'),
+            totalRefunds: sumByType('REFUND'),
+            totalUsage: sumByType('USAGE'),
+            totalReturnCredits: sumByType('RETURN_CREDIT'),
+            customerWalletBalance: customerWalletBalance,
+            riderWalletBalance: riderWalletBalance,
+            totalWalletBalance: customerWalletBalance + riderWalletBalance
+        };
+
+        res.status(200).json({
+            reportTitle: 'Advance Wallet Report',
+            filtersUsed: { startDate, endDate, ownerType, walletTxnType },
+            summary: summary,
+            reportData: result.rows
+        });
+    } catch (error) {
+        console.error('Error generating wallet transactions report:', error);
+        res.status(500).json({ error: 'Failed to generate wallet transactions report.', details: error.message });
     }
 });
 
