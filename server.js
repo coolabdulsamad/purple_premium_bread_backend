@@ -47,6 +47,7 @@ const returnsRoutes = require('./routes/returns');
 const walletsRoutes = require('./routes/wallets');
 const aiAssistantRoutes = require('./routes/aiAssistant');
 const chatRoutes = require('./routes/chat');
+const whatsappRoutes = require('./routes/whatsapp');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -59,6 +60,11 @@ app.use(cors({
 
 app.use(express.json());
 app.use(fileUpload());
+
+// WhatsApp Cloud API: the webhook must stay open (Meta calls it with no JWT; it
+// self-verifies via the verify token), so it is mounted BEFORE the governance
+// layer. Its link endpoints run their own authenticate middleware internally.
+app.use('/api/whatsapp', whatsappRoutes);
 
 // --- Security & governance layer (order matters) ---
 // 1. Resolve the JWT (non-blocking: attaches req.user when a valid token is present)
