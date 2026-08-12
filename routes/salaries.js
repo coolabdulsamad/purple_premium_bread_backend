@@ -3,6 +3,48 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db/db');
 const authenticate = require('../middleware/authenticate');
+const { recordMoneyTransaction } = require('../utils/money');
+
+// ---------------------------------------------------------------------------
+// Schema guards (migration 002 adds the loan repayment schedule, the
+// loan_repayments ledger and the salary credit-sales deduction column; every
+// route falls back to legacy behavior until the migration is applied)
+// ---------------------------------------------------------------------------
+let loanScheduleReady = null;
+async function ensureLoanSchedule() {
+    if (loanScheduleReady !== null) return loanScheduleReady;
+    try {
+        const r = await db.query(`
+            SELECT
+              (SELECT COUNT(*) FROM information_schema.columns
+                 WHERE table_name = 'staff_loans'
+                   AND column_name IN ('repayment_months','monthly_deduction','remaining_balance','status','due_date','start_date')) AS cols,
+              (SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'loan_repayments') AS ledger,
+              (SELECT COUNT(*) FROM information_schema.columns
+                 WHERE table_name = 'salary_payments' AND column_name = 'credit_sales_deduction') AS csd
+        `);
+        const row = r.rows[0];
+        loanScheduleReady = Number(row.cols) >= 6 && Number(row.ledger) > 0 && Number(row.csd) > 0;
+    } catch (e) {
+        loanScheduleReady = false;
+    }
+    return loanScheduleReady;
+}
+
+let creditLinkReady = null;
+async function ensureCreditLink() {
+    if (creditLinkReady !== null) return creditLinkReady;
+    try {
+        const r = await db.query(`
+            SELECT COUNT(*) AS c FROM information_schema.columns
+            WHERE table_name = 'customers' AND column_name IN ('user_id','staff_member_id')
+        `);
+        creditLinkReady = Number(r.rows[0].c) >= 2;
+    } catch (e) {
+        creditLinkReady = false;
+    }
+    return creditLinkReady;
+}
 
 // GET /api/salaries/staff - Get all staff with salary information
 router.get('/staff', async (req, res) => {
@@ -16,8 +58,13 @@ router.get('/staff', async (req, res) => {
             isActive = 'true'
         } = req.query;
 
-let query = `
-            SELECT 
+        const scheduleReady = await ensureLoanSchedule();
+        const outstandingLoanSubquery = scheduleReady
+            ? `(SELECT COALESCE(SUM(COALESCE(sl.remaining_balance, sl.amount)), 0) FROM staff_loans sl WHERE sl.user_id = u.id AND sl.is_paid = FALSE) as outstanding_loan_amount`
+            : `(SELECT COALESCE(SUM(sl.amount), 0) FROM staff_loans sl WHERE sl.user_id = u.id AND sl.is_paid = FALSE) as outstanding_loan_amount`;
+
+        let query = `
+            SELECT
                 u.id, u.username, u.fullname, u.email, u.phone_number, u.role, u.is_active,
                 COALESCE(ss.base_salary, 0) as base_salary,
                 COALESCE(ss.allowances, 0) as allowances,
@@ -25,14 +72,14 @@ let query = `
                 COALESCE(ss.net_salary, 0) as net_salary,
                 ss.salary_type,
                 ss.bank_name,
-                ss.bank_account_name,  /* <--- ADD THIS LINE */
+                ss.bank_account_name,
                 ss.account_number,
                 ss.tax_rate,
                 ss.pension_rate,
                 ss.is_active as salary_active,
                 (SELECT COUNT(*) FROM salary_payments sp WHERE sp.user_id = u.id AND sp.status = 'paid') as total_payments,
                 (SELECT MAX(payment_date) FROM salary_payments sp WHERE sp.user_id = u.id AND sp.status = 'paid') as last_payment_date,
-                (SELECT COALESCE(SUM(sl.amount), 0) FROM staff_loans sl WHERE sl.user_id = u.id AND sl.is_paid = FALSE) as outstanding_loan_amount
+                ${outstandingLoanSubquery}
             FROM users u
             LEFT JOIN staff_salaries ss ON u.id = ss.user_id
             WHERE u.is_active = $1
@@ -41,7 +88,6 @@ let query = `
         const params = [isActive === 'true'];
         let paramCount = 2;
 
-        // Add filters
         if (role) {
             query += ` AND u.role = $${paramCount}`;
             params.push(role);
@@ -100,36 +146,22 @@ router.get('/payments', async (req, res) => {
             limit = 50
         } = req.query;
 
-let query = `
-            SELECT 
+        let query = `
+            SELECT
                 sp.*,
-                -- 1. Fullname: Prioritize staff_members name (sm) over generic user name (u)
                 COALESCE(sm.fullname, u.fullname) as staff_name,
-                
-                -- 2. Role: FIX - Use sm.position (if staff) or u.role (if user)
                 COALESCE(sm.position, u.role) as staff_role,
-                
-                -- 3. Email: Safe fallback, assuming it's usually in the users table (u)
                 COALESCE(u.email, sm.email) as staff_email,
-                
                 paid_by_user.fullname as paid_by_name
             FROM salary_payments sp
-            
-            -- 1. LEFT JOIN for staff members (sm) - links using staff_member_id
             LEFT JOIN staff_members sm ON sp.staff_member_id = sm.id
-            
-            -- 2. LEFT JOIN for generic users (u) - links using user_id
             LEFT JOIN users u ON sp.user_id = u.id
-            
-            -- 3. Standard JOIN for the admin/user who paid
             LEFT JOIN users paid_by_user ON sp.paid_by = paid_by_user.id
-            
             WHERE 1=1
         `;
         const params = [];
         let paramCount = 1;
 
-        // User and Role filters
         if (userId) {
             query += ` AND sp.user_id = $${paramCount}`;
             params.push(userId);
@@ -142,7 +174,6 @@ let query = `
             paramCount++;
         }
 
-        // Date filters with period support
         if (period) {
             let dateCondition = '';
 
@@ -183,7 +214,6 @@ let query = `
             }
         }
 
-        // Status and method filters
         if (status) {
             query += ` AND sp.status = $${paramCount}`;
             params.push(status);
@@ -196,7 +226,6 @@ let query = `
             paramCount++;
         }
 
-        // Amount filters
         if (minAmount) {
             query += ` AND sp.net_amount >= $${paramCount}`;
             params.push(parseFloat(minAmount));
@@ -209,11 +238,11 @@ let query = `
             paramCount++;
         }
 
-        // Search filter
         if (search) {
             query += ` AND (
-                u.fullname ILIKE $${paramCount} OR 
-                u.email ILIKE $${paramCount} OR 
+                u.fullname ILIKE $${paramCount} OR
+                sm.fullname ILIKE $${paramCount} OR
+                u.email ILIKE $${paramCount} OR
                 sp.payment_reference ILIKE $${paramCount} OR
                 sp.notes ILIKE $${paramCount}
             )`;
@@ -221,12 +250,10 @@ let query = `
             paramCount++;
         }
 
-        // Get total count for pagination
         const countQuery = `SELECT COUNT(*) FROM (${query}) as count_query`;
         const countResult = await db.query(countQuery, params);
         const totalCount = parseInt(countResult.rows[0].count);
 
-        // Add ordering and pagination
         query += ` ORDER BY sp.payment_date DESC, sp.created_at DESC`;
 
         const offset = (page - 1) * limit;
@@ -251,40 +278,6 @@ let query = `
     }
 });
 
-// GET /api/salaries/payments/:id - Get single payment details
-// router.get('/payments/:id', async (req, res) => {
-//     const { id } = req.params;
-//     try {
-//         const paymentQuery = `
-//             SELECT 
-//                 sp.*,
-//                 u.fullname as staff_name,
-//                 u.role as staff_role,
-//                 u.email as staff_email,
-//                 u.phone_number as staff_phone,
-//                 paid_by_user.fullname as paid_by_name,
-//                 paid_by_user.email as paid_by_email
-//             FROM salary_payments sp
-//             JOIN users u ON sp.user_id = u.id
-//             LEFT JOIN users paid_by_user ON sp.paid_by = paid_by_user.id
-//             WHERE sp.id = $1
-//         `;
-
-//         const paymentResult = await db.query(paymentQuery, [id]);
-
-//         if (paymentResult.rows.length === 0) {
-//             return res.status(404).json({ error: 'Salary payment not found.' });
-//         }
-
-//         res.status(200).json(paymentResult.rows[0]);
-//     } catch (error) {
-//         console.error('Error fetching payment details:', error);
-//         res.status(500).json({ error: 'Failed to fetch payment details.', details: error.message });
-//     }
-// });
-
-// routes/salaries.js
-
 // GET /api/salaries/payments/:id - Get single salary payment details
 router.get('/payments/:id', async (req, res) => {
     const paymentId = req.params.id;
@@ -292,39 +285,23 @@ router.get('/payments/:id', async (req, res) => {
     if (isNaN(parseInt(paymentId))) {
         return res.status(400).json({ error: 'Invalid payment ID.' });
     }
-    
+
     try {
-        const client = await db.getClient();
-        
         const query = `
-            SELECT 
+            SELECT
                 sp.*,
-                -- 1. Fullname: Prioritize staff_members name (sm) over generic user name (u)
                 COALESCE(sm.fullname, u.fullname) as staff_name,
-                
-                -- 2. Role: Use sm.position (if staff) or u.role (if user)
                 COALESCE(sm.position, u.role) as staff_role,
-                
-                -- 3. Email: Safe fallback from users table (u)
                 COALESCE(u.email, sm.email) as staff_email,
-                
                 paid_by_user.fullname as paid_by_name
             FROM salary_payments sp
-            
-            -- 1. LEFT JOIN for staff members (sm) - links using staff_member_id
             LEFT JOIN staff_members sm ON sp.staff_member_id = sm.id
-            
-            -- 2. LEFT JOIN for generic users (u) - links using user_id
             LEFT JOIN users u ON sp.user_id = u.id
-            
-            -- 3. Standard JOIN for the admin/user who paid
             LEFT JOIN users paid_by_user ON sp.paid_by = paid_by_user.id
-            
             WHERE sp.id = $1
         `;
 
-        const result = await client.query(query, [paymentId]);
-        client.release();
+        const result = await db.query(query, [paymentId]);
 
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'Salary payment not found.' });
@@ -338,71 +315,14 @@ router.get('/payments/:id', async (req, res) => {
     }
 });
 
-// POST /api/salaries/staff/:id/salary - Update staff salary structure
-// router.post('/staff/:id/salary', async (req, res) => {
-//     const { id } = req.params;
-//     const {
-//         base_salary,
-//         allowances,
-//         deductions,
-//         salary_type,
-//         bank_name,
-//         account_number,
-//         tax_rate,
-//         pension_rate
-//     } = req.body;
-
-//     try {
-//         // Validate user exists
-//         const userCheck = await db.query('SELECT id FROM users WHERE id = $1', [id]);
-//         if (userCheck.rows.length === 0) {
-//             return res.status(404).json({ error: 'Staff member not found.' });
-//         }
-
-//         // Calculate net salary
-//         const netSalary = parseFloat(base_salary) + parseFloat(allowances || 0) - parseFloat(deductions || 0);
-
-//         const query = `
-//             INSERT INTO staff_salaries (
-//                 user_id, base_salary, allowances, deductions, net_salary,
-//                 salary_type, bank_name, account_number, tax_rate, pension_rate
-//             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-//             ON CONFLICT (user_id) 
-//             DO UPDATE SET
-//                 base_salary = EXCLUDED.base_salary,
-//                 allowances = EXCLUDED.allowances,
-//                 deductions = EXCLUDED.deductions,
-//                 net_salary = EXCLUDED.net_salary,
-//                 salary_type = EXCLUDED.salary_type,
-//                 bank_name = EXCLUDED.bank_name,
-//                 account_number = EXCLUDED.account_number,
-//                 tax_rate = EXCLUDED.tax_rate,
-//                 pension_rate = EXCLUDED.pension_rate,
-//                 updated_at = CURRENT_TIMESTAMP
-//             RETURNING *
-//         `;
-
-//         const result = await db.query(query, [
-//             id,
-//             parseFloat(base_salary),
-//             parseFloat(allowances || 0),
-//             parseFloat(deductions || 0),
-//             netSalary,
-//             salary_type,
-//             bank_name,
-//             account_number,
-//             parseFloat(tax_rate || 0),
-//             parseFloat(pension_rate || 0)
-//         ]);
-
-//         res.status(200).json(result.rows[0]);
-//     } catch (error) {
-//         console.error('Error updating staff salary:', error);
-//         res.status(500).json({ error: 'Failed to update staff salary.', details: error.message });
-//     }
-// });
-
-// routes/salaries.js - FIXED PAYMENT ROUTE
+// POST /api/salaries/payments - Record a salary payment
+// Enhancements (all backward compatible):
+//  - loan_deduction without explicit loan_ids auto-allocates across the staff member's
+//    unpaid loans (oldest first), decrementing remaining_balance per loan and completing
+//    loans when fully repaid (after migration 002; legacy behavior before it).
+//  - credit_sales_deduction allocates oldest-first against the staff member's unpaid credit
+//    sales (via their linked customer record) and records real payment rows.
+//  - The net cash paid out is mirrored into Money Management.
 router.post('/payments', authenticate, async (req, res) => {
     const paid_by = parseInt(req.user.id);
     if (!paid_by || isNaN(paid_by)) {
@@ -411,7 +331,7 @@ router.post('/payments', authenticate, async (req, res) => {
 
     const {
         user_id,
-        staff_type, // <--- NEW: FIELD TO DETERMINE WHICH ID COLUMN TO USE
+        staff_type,
         salary_period,
         payment_date,
         base_salary,
@@ -424,13 +344,9 @@ router.post('/payments', authenticate, async (req, res) => {
         payment_reference,
         notes,
         loan_deduction,
-        loan_ids
+        loan_ids,
+        credit_sales_deduction
     } = req.body;
-
-    console.log('Payment data received:', {
-        user_id, staff_type, salary_period, payment_date, base_salary, allowances,
-        deductions, tax_amount, pension_amount, net_amount, loan_deduction
-    });
 
     if (!user_id || !payment_date || !base_salary || !net_amount) {
         return res.status(400).json({ error: 'Missing required fields for payment.' });
@@ -440,106 +356,227 @@ router.post('/payments', authenticate, async (req, res) => {
     try {
         await client.query('BEGIN');
 
-        // --- START FIX: Determine which ID column to set ---
+        const scheduleReady = await ensureLoanSchedule();
+        const linkReady = await ensureCreditLink();
+
         const staffID = parseInt(user_id);
         let payment_user_id = null;
         let payment_staff_member_id = null;
 
-        if (staff_type && String(staff_type).toLowerCase() === 'staff_member') {
-            // Payment is for a staff member, populate staff_member_id
+        const isStaffMember = staff_type && String(staff_type).toLowerCase() === 'staff_member';
+        if (isStaffMember) {
             payment_staff_member_id = staffID;
         } else {
-            // Payment is for a generic user (or type is missing), populate user_id
             payment_user_id = staffID;
         }
-        // --- END FIX ---
 
-
-        // Calculate gross amount
         const gross_amount = parseFloat(base_salary || 0) + parseFloat(allowances || 0);
+        const loanDeduction = Math.max(0, parseFloat(loan_deduction) || 0);
+        const creditSalesDeduction = Math.max(0, parseFloat(credit_sales_deduction) || 0);
 
-        // Calculate total deductions
-        const total_deductions = parseFloat(deductions || 0) +
-            parseFloat(tax_amount || 0) +
-            parseFloat(pension_amount || 0) +
-            parseFloat(loan_deduction || 0);
+        // 1. Insert the salary payment record
+        let paymentQuery, paymentParams;
+        if (scheduleReady) {
+            paymentQuery = `
+                INSERT INTO salary_payments
+                    (user_id, staff_member_id, salary_period, payment_date, base_salary, allowances,
+                     deductions, tax_amount, pension_amount, net_amount, gross_amount,
+                     payment_method, payment_reference, notes, paid_by, status, created_at,
+                     loan_deduction, credit_sales_deduction)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'paid', CURRENT_TIMESTAMP, $16, $17)
+                RETURNING id
+            `;
+            paymentParams = [
+                payment_user_id, payment_staff_member_id,
+                salary_period || payment_date, payment_date,
+                parseFloat(base_salary || 0), parseFloat(allowances || 0),
+                parseFloat(deductions || 0), parseFloat(tax_amount || 0),
+                parseFloat(pension_amount || 0), parseFloat(net_amount), gross_amount,
+                payment_method, payment_reference, notes, paid_by,
+                loanDeduction, creditSalesDeduction
+            ];
+        } else {
+            paymentQuery = `
+                INSERT INTO salary_payments
+                    (user_id, staff_member_id, salary_period, payment_date, base_salary, allowances,
+                     deductions, tax_amount, pension_amount, net_amount, gross_amount,
+                     payment_method, payment_reference, notes, paid_by, status, created_at, loan_deduction)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'paid', CURRENT_TIMESTAMP, $16)
+                RETURNING id
+            `;
+            paymentParams = [
+                payment_user_id, payment_staff_member_id,
+                salary_period || payment_date, payment_date,
+                parseFloat(base_salary || 0), parseFloat(allowances || 0),
+                parseFloat(deductions || 0), parseFloat(tax_amount || 0),
+                parseFloat(pension_amount || 0), parseFloat(net_amount), gross_amount,
+                payment_method, payment_reference, notes, paid_by,
+                loanDeduction
+            ];
+        }
 
-        console.log('Calculated values:', { gross_amount, total_deductions });
-
-        // Insert the Salary Payment with all fields (updated to include staff_member_id)
-        // NOTE: Parameter indices shift by 1 due to the new column
-        const paymentQuery = `
-            INSERT INTO salary_payments 
-                (user_id, staff_member_id, salary_period, payment_date, base_salary, allowances, 
-                 deductions, tax_amount, pension_amount, net_amount, gross_amount,
-                 payment_method, payment_reference, notes, paid_by, status, created_at, loan_deduction)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'paid', CURRENT_TIMESTAMP, $16)
-            RETURNING id
-        `;
-
-        const paymentResult = await client.query(paymentQuery, [
-            payment_user_id,            // $1: ID of user (or null) - FIX
-            payment_staff_member_id,    // $2: ID of staff_member (or null) - FIX
-            salary_period || payment_date, // $3: was $2
-            payment_date,                // $4: was $3
-            parseFloat(base_salary || 0), // $5: was $4
-            parseFloat(allowances || 0),  // $6: was $5
-            parseFloat(deductions || 0),  // $7: was $6
-            parseFloat(tax_amount || 0),  // $8: was $7
-            parseFloat(pension_amount || 0), // $9: was $8
-            parseFloat(net_amount),      // $10: was $9
-            gross_amount,                // $11: was $10
-            payment_method,              // $12: was $11
-            payment_reference,           // $13: was $12
-            notes,                       // $14: was $13
-            paid_by,                     // $15: was $14
-            parseFloat(loan_deduction || 0) // $16: was $15
-        ]);
-
+        const paymentResult = await client.query(paymentQuery, paymentParams);
         const newPaymentId = paymentResult.rows[0].id;
 
-// In the payment processing route, update the loan update section:
-if (loan_ids && loan_ids.length > 0 && parseFloat(loan_deduction || 0) > 0) {
-    // Determine which ID column to use based on staff type
-    let idCondition = '';
-    let idValue = null;
-    
-    if (payment_user_id) {
-        idCondition = 'user_id = $3';
-        idValue = payment_user_id;
-    } else if (payment_staff_member_id) {
-        idCondition = 'staff_member_id = $3';
-        idValue = payment_staff_member_id;
-    } else {
-        throw new Error('Cannot determine staff type for loan update');
-    }
+        // 2. Process the loan deduction
+        if (loanDeduction > 0) {
+            let loanIdList = Array.isArray(loan_ids) ? loan_ids.map(Number).filter((n) => !isNaN(n)) : [];
 
-    const loanUpdateQuery = `
-        UPDATE staff_loans
-        SET is_paid = TRUE, deducted_on_payment_id = $1, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ANY($2) 
-          AND ${idCondition}
-          AND is_paid = FALSE
-    `;
-    await client.query(loanUpdateQuery, [newPaymentId, loan_ids, idValue]);
-}
+            if (loanIdList.length === 0) {
+                const idCol = payment_user_id ? 'user_id' : 'staff_member_id';
+                const idVal = payment_user_id || payment_staff_member_id;
+                const autoLoans = await client.query(
+                    `SELECT id FROM staff_loans WHERE ${idCol} = $1 AND is_paid = FALSE ORDER BY loan_date ASC, id ASC`,
+                    [idVal]
+                );
+                loanIdList = autoLoans.rows.map((r) => r.id);
+            }
+
+            if (scheduleReady) {
+                // Sequential allocation: oldest loans first, partial deductions supported
+                let remainingDeduction = loanDeduction;
+                for (const loanId of loanIdList) {
+                    if (remainingDeduction <= 0) break;
+
+                    const loanRes = await client.query(
+                        'SELECT id, amount, remaining_balance FROM staff_loans WHERE id = $1 AND is_paid = FALSE FOR UPDATE',
+                        [loanId]
+                    );
+                    if (loanRes.rows.length === 0) continue;
+
+                    const loan = loanRes.rows[0];
+                    const outstandingBefore = parseFloat(loan.remaining_balance != null ? loan.remaining_balance : loan.amount);
+                    const payAmt = Math.min(remainingDeduction, outstandingBefore);
+                    if (payAmt <= 0) continue;
+
+                    const newRemaining = outstandingBefore - payAmt;
+                    const completed = newRemaining <= 0;
+                    await client.query(
+                        `UPDATE staff_loans
+                         SET remaining_balance = $1,
+                             is_paid = $2,
+                             status = $3,
+                             deducted_on_payment_id = $4,
+                             completed_at = CASE WHEN $2 THEN CURRENT_TIMESTAMP ELSE completed_at END,
+                             updated_at = CURRENT_TIMESTAMP
+                         WHERE id = $5`,
+                        [newRemaining, completed, completed ? 'completed' : 'active', newPaymentId, loanId]
+                    );
+
+                    await client.query(
+                        'INSERT INTO loan_repayments (loan_id, amount, payment_date, salary_payment_id, notes) VALUES ($1, $2, $3, $4, $5)',
+                        [loanId, payAmt, payment_date, newPaymentId, 'Deduction from salary payment']
+                    );
+
+                    remainingDeduction -= payAmt;
+                }
+            } else if (loanIdList.length > 0) {
+                // Legacy behavior: mark the selected loans fully paid
+                const idCondition = payment_user_id ? 'user_id = $3' : 'staff_member_id = $3';
+                const idValue = payment_user_id || payment_staff_member_id;
+                await client.query(
+                    `UPDATE staff_loans
+                     SET is_paid = TRUE, deducted_on_payment_id = $1, updated_at = CURRENT_TIMESTAMP
+                     WHERE id = ANY($2) AND ${idCondition} AND is_paid = FALSE`,
+                    [newPaymentId, loanIdList, idValue]
+                );
+            }
+        }
+
+        // 3. Staff credit-sales deduction -> allocate oldest-first across unpaid credit sales
+        let creditAllocated = 0;
+        const creditAllocations = [];
+        if (creditSalesDeduction > 0 && linkReady) {
+            const linkCol = isStaffMember ? 'staff_member_id' : 'user_id';
+            const custRes = await client.query(
+                `SELECT id FROM customers WHERE ${linkCol} = $1 ORDER BY id LIMIT 1 FOR UPDATE`,
+                [staffID]
+            );
+
+            if (custRes.rows.length > 0) {
+                const staffCustomerId = custRes.rows[0].id;
+                const unpaidSales = await client.query(
+                    `SELECT id, balance_due FROM sales_transactions
+                     WHERE customer_id = $1 AND balance_due > 0
+                     ORDER BY due_date ASC NULLS LAST, sale_date ASC, id ASC FOR UPDATE`,
+                    [staffCustomerId]
+                );
+
+                let remainingCredit = creditSalesDeduction;
+                for (const sale of unpaidSales.rows) {
+                    if (remainingCredit <= 0) break;
+                    const pay = Math.min(remainingCredit, parseFloat(sale.balance_due));
+                    if (pay <= 0) continue;
+
+                    const pmt = await client.query(
+                        `INSERT INTO payments (transaction_id, customer_id, amount, payment_date, payment_method, is_rider_payment)
+                         VALUES ($1, $2, $3, $4, 'Salary Deduction', FALSE)
+                         RETURNING id`,
+                        [sale.id, staffCustomerId, pay, payment_date]
+                    );
+
+                    await client.query(
+                        `UPDATE sales_transactions
+                         SET amount_paid = amount_paid + $1,
+                             balance_due = balance_due - $1,
+                             status = CASE WHEN balance_due - $1 <= 0 THEN 'Paid' ELSE 'Partially Paid' END,
+                             updated_at = CURRENT_TIMESTAMP
+                         WHERE id = $2`,
+                        [pay, sale.id]
+                    );
+
+                    creditAllocations.push({ sale_id: sale.id, payment_id: pmt.rows[0].id, allocated: pay });
+                    remainingCredit -= pay;
+                }
+
+                creditAllocated = Math.round((creditSalesDeduction - remainingCredit) * 100) / 100;
+
+                if (creditAllocated > 0) {
+                    await client.query(
+                        'UPDATE customers SET balance = GREATEST(balance - $1, 0) WHERE id = $2',
+                        [creditAllocated, staffCustomerId]
+                    );
+                }
+            }
+
+            if (isStaffMember) {
+                await client.query(
+                    'UPDATE staff_members SET current_balance = GREATEST(current_balance - $1, 0) WHERE id = $2',
+                    [creditAllocated > 0 ? creditAllocated : creditSalesDeduction, staffID]
+                );
+            }
+        }
 
         await client.query('COMMIT');
 
-        // Return the complete payment record (FIXED JOIN)
-        const completePaymentQuery = `
-            SELECT 
-                sp.*, 
-                u.fullname as staff_name, 
-                u.role as staff_role
-            FROM salary_payments sp
-            -- FIX: Join the 'users' table using whichever ID column is NOT NULL
-            JOIN users u ON u.id = COALESCE(sp.user_id, sp.staff_member_id) 
-            WHERE sp.id = $1
-        `;
-        const completeResult = await client.query(completePaymentQuery, [newPaymentId]);
+        // 4. Mirror the net cash paid out into Money Management (fail-open)
+        await recordMoneyTransaction({
+            direction: 'OUT',
+            amount: parseFloat(net_amount),
+            category: 'salary_payment',
+            payment_method: payment_method || 'bank_transfer',
+            reference_type: 'salary_payment',
+            reference_id: newPaymentId,
+            description: `Salary payment${salary_period ? ` (${salary_period})` : ''} — net paid out`,
+            transaction_date: payment_date,
+            recorded_by: paid_by,
+            approval_id: req.approvalBypassId || null
+        });
 
-        res.status(201).json(completeResult.rows[0]);
+        // 5. Return the complete payment record (original response shape + allocation info)
+        const completeResult = await db.query(
+            `SELECT sp.*, u.fullname as staff_name, u.role as staff_role
+             FROM salary_payments sp
+             LEFT JOIN users u ON u.id = COALESCE(sp.user_id, sp.staff_member_id)
+             WHERE sp.id = $1`,
+            [newPaymentId]
+        );
+
+        res.status(201).json({
+            ...completeResult.rows[0],
+            credit_allocated: creditAllocated,
+            credit_allocations: creditAllocations
+        });
 
     } catch (error) {
         await client.query('ROLLBACK');
@@ -550,9 +587,19 @@ if (loan_ids && loan_ids.length > 0 && parseFloat(loan_deduction || 0) > 0) {
     }
 });
 
-// POST /api/salaries/loans - Record a new staff loan/advance (FINAL FIXED VERSION)
+// POST /api/salaries/loans - Record a new staff loan/advance (with optional repayment schedule)
 router.post('/loans', authenticate, async (req, res) => {
-    const { user_id: borrower_id, staff_type, loan_date, amount, reason } = req.body; 
+    const {
+        user_id: borrower_id,
+        staff_type,
+        loan_date,
+        amount,
+        reason,
+        repayment_months,
+        start_date,
+        due_date,
+        payment_method = 'Cash'
+    } = req.body;
 
     if (!borrower_id || !loan_date || !amount) {
         return res.status(400).json({ error: 'Missing required fields: user_id (borrower_id), loan_date, and amount.' });
@@ -563,131 +610,299 @@ router.post('/loans', authenticate, async (req, res) => {
     }
 
     const client = await db.getClient();
-    
+
     try {
         await client.query('BEGIN');
 
         let user_id_value = null;
         let staff_member_id_value = null;
-        let final_staff_type = null;
 
-        // Use the staff_type from frontend if provided, otherwise auto-detect
         if (staff_type === 'staff_member') {
-            // Verify the ID exists in staff_members table
-            const staffCheckQuery = `SELECT id FROM staff_members WHERE id = $1 AND is_active = true`;
-            const staffCheckResult = await client.query(staffCheckQuery, [borrower_id]);
-            
+            const staffCheckResult = await client.query(
+                'SELECT id FROM staff_members WHERE id = $1 AND is_active = true',
+                [borrower_id]
+            );
             if (staffCheckResult.rows.length > 0) {
                 staff_member_id_value = borrower_id;
-                final_staff_type = 'staff_member';
-                console.log(`ID ${borrower_id} confirmed as staff_member - saving to staff_member_id`);
             } else {
                 await client.query('ROLLBACK');
-                return res.status(404).json({ 
-                    error: 'Staff member not found.', 
-                    details: `ID ${borrower_id} not found in staff_members table.` 
+                return res.status(404).json({
+                    error: 'Staff member not found.',
+                    details: `ID ${borrower_id} not found in staff_members table.`
                 });
             }
         } else if (staff_type === 'user') {
-            // Verify the ID exists in users table
-            const userCheckQuery = `SELECT id FROM users WHERE id = $1 AND is_active = true`;
-            const userCheckResult = await client.query(userCheckQuery, [borrower_id]);
-            
+            const userCheckResult = await client.query(
+                'SELECT id FROM users WHERE id = $1 AND is_active = true',
+                [borrower_id]
+            );
             if (userCheckResult.rows.length > 0) {
                 user_id_value = borrower_id;
-                final_staff_type = 'user';
-                console.log(`ID ${borrower_id} confirmed as user - saving to user_id`);
             } else {
                 await client.query('ROLLBACK');
-                return res.status(404).json({ 
-                    error: 'User not found.', 
-                    details: `ID ${borrower_id} not found in users table.` 
+                return res.status(404).json({
+                    error: 'User not found.',
+                    details: `ID ${borrower_id} not found in users table.`
                 });
             }
         } else {
-            // Auto-detect if staff_type not provided
-            // FIRST, check staff_members table
-            const staffCheckQuery = `SELECT id FROM staff_members WHERE id = $1 AND is_active = true`;
-            const staffCheckResult = await client.query(staffCheckQuery, [borrower_id]);
-
+            const staffCheckResult = await client.query(
+                'SELECT id FROM staff_members WHERE id = $1 AND is_active = true',
+                [borrower_id]
+            );
             if (staffCheckResult.rows.length > 0) {
                 staff_member_id_value = borrower_id;
-                final_staff_type = 'staff_member';
-                console.log(`ID ${borrower_id} auto-detected as staff_member - saving to staff_member_id`);
             } else {
-                // Check users table
-                const userCheckQuery = `SELECT id FROM users WHERE id = $1 AND is_active = true`;
-                const userCheckResult = await client.query(userCheckQuery, [borrower_id]);
-
+                const userCheckResult = await client.query(
+                    'SELECT id FROM users WHERE id = $1 AND is_active = true',
+                    [borrower_id]
+                );
                 if (userCheckResult.rows.length > 0) {
                     user_id_value = borrower_id;
-                    final_staff_type = 'user';
-                    console.log(`ID ${borrower_id} auto-detected as user - saving to user_id`);
                 } else {
                     await client.query('ROLLBACK');
-                    return res.status(404).json({ 
-                        error: 'Staff member not found.', 
-                        details: `ID ${borrower_id} not found in users or staff_members table.` 
+                    return res.status(404).json({
+                        error: 'Staff member not found.',
+                        details: `ID ${borrower_id} not found in users or staff_members table.`
                     });
                 }
             }
         }
 
-        console.log(`Loan processing - ID: ${borrower_id}, Type: ${final_staff_type}, UserID: ${user_id_value}, StaffMemberID: ${staff_member_id_value}`);
+        const loanAmount = parseFloat(amount);
+        const months = parseInt(repayment_months);
+        const scheduleReady = await ensureLoanSchedule();
 
-        // Insert into the correct columns
-        const query = `
-            INSERT INTO staff_loans 
-                (user_id, staff_member_id, loan_date, amount, reason, created_at)
-            VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
-            RETURNING *
-        `;
-        
-        const result = await client.query(query, [
-            user_id_value,              // $1: null for staff_member, ID for user
-            staff_member_id_value,      // $2: null for user, ID for staff_member
-            loan_date, 
-            parseFloat(amount), 
-            reason
-        ]);
+        let result;
+        if (scheduleReady) {
+            const monthly = months > 0 ? Math.round((loanAmount / months) * 100) / 100 : loanAmount;
+            result = await client.query(
+                `INSERT INTO staff_loans
+                    (user_id, staff_member_id, loan_date, amount, reason, created_at,
+                     repayment_months, monthly_deduction, remaining_balance, start_date, due_date, status)
+                 VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, $6, $7, $8, $9, $10, 'active')
+                 RETURNING *`,
+                [
+                    user_id_value,
+                    staff_member_id_value,
+                    loan_date,
+                    loanAmount,
+                    reason,
+                    months > 0 ? months : null,
+                    monthly,
+                    loanAmount,
+                    start_date || loan_date,
+                    due_date || null
+                ]
+            );
+        } else {
+            result = await client.query(
+                `INSERT INTO staff_loans
+                    (user_id, staff_member_id, loan_date, amount, reason, created_at)
+                 VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+                 RETURNING *`,
+                [user_id_value, staff_member_id_value, loan_date, loanAmount, reason]
+            );
+        }
 
         await client.query('COMMIT');
-        
+
+        // Mirror the cash handed out into Money Management (fail-open)
+        await recordMoneyTransaction({
+            direction: 'OUT',
+            amount: loanAmount,
+            category: 'loan_disbursement',
+            payment_method,
+            reference_type: 'staff_loan',
+            reference_id: result.rows[0].id,
+            description: `Staff loan disbursed${months > 0 ? ` — repayable over ${months} month(s)` : ''}`,
+            transaction_date: loan_date,
+            recorded_by: req.user ? req.user.id : null,
+            approval_id: req.approvalBypassId || null
+        });
+
         // Return the loan record with staff information
-        const loanWithStaffQuery = `
-            SELECT 
+        const loanWithStaff = await db.query(
+            `SELECT
                 sl.*,
                 COALESCE(u.fullname, sm.fullname) as borrower_name,
                 COALESCE(u.role, sm.position) as borrower_role,
                 COALESCE(u.email, sm.email) as borrower_email,
-                CASE 
+                CASE
                     WHEN sl.user_id IS NOT NULL THEN 'user'
                     WHEN sl.staff_member_id IS NOT NULL THEN 'staff_member'
                     ELSE 'unknown'
                 END as staff_type
-            FROM staff_loans sl
-            LEFT JOIN users u ON sl.user_id = u.id
-            LEFT JOIN staff_members sm ON sl.staff_member_id = sm.id
-            WHERE sl.id = $1
-        `;
-        
-        const loanWithStaff = await client.query(loanWithStaffQuery, [result.rows[0].id]);
-        
+             FROM staff_loans sl
+             LEFT JOIN users u ON sl.user_id = u.id
+             LEFT JOIN staff_members sm ON sl.staff_member_id = sm.id
+             WHERE sl.id = $1`,
+            [result.rows[0].id]
+        );
+
         res.status(201).json(loanWithStaff.rows[0]);
-        
+
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('Error recording staff loan:', error);
-        res.status(500).json({ 
-            error: 'Failed to record staff loan.', 
-            details: error.message 
+        res.status(500).json({
+            error: 'Failed to record staff loan.',
+            details: error.message
         });
     } finally {
         client.release();
     }
 });
 
-// GET /api/salaries/loans - Get all loans with filters (UPDATED WITH PROPER JOINS)
+// PUT /api/salaries/loans/:loanId - Update a loan, including its repayment schedule
+router.put('/loans/:loanId', authenticate, async (req, res) => {
+    const { loanId } = req.params;
+    const { amount, loan_date, reason, is_paid, repayment_months, start_date, due_date } = req.body;
+
+    try {
+        const current = await db.query('SELECT * FROM staff_loans WHERE id = $1', [loanId]);
+        if (current.rows.length === 0) {
+            return res.status(404).json({ error: 'Loan not found.' });
+        }
+        const loan = current.rows[0];
+        const scheduleReady = await ensureLoanSchedule();
+
+        if (scheduleReady) {
+            const newAmount = amount !== undefined ? parseFloat(amount) : parseFloat(loan.amount);
+            const months = repayment_months !== undefined
+                ? parseInt(repayment_months)
+                : (loan.repayment_months ? parseInt(loan.repayment_months) : null);
+            const remaining = loan.remaining_balance != null ? parseFloat(loan.remaining_balance) : newAmount;
+            // Recompute the installment from what is left to repay
+            const monthly = months > 0 ? Math.round((remaining / months) * 100) / 100 : remaining;
+            const paid = is_paid !== undefined ? !!is_paid : loan.is_paid;
+
+            const result = await db.query(
+                `UPDATE staff_loans
+                 SET amount = $1, loan_date = $2, reason = $3, is_paid = $4,
+                     repayment_months = $5, monthly_deduction = $6, start_date = $7, due_date = $8,
+                     status = CASE WHEN $4 THEN 'completed' ELSE 'active' END,
+                     completed_at = CASE WHEN $4 THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE NULL END,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = $9
+                 RETURNING *`,
+                [
+                    newAmount,
+                    loan_date || loan.loan_date,
+                    reason !== undefined ? reason : loan.reason,
+                    paid,
+                    months > 0 ? months : null,
+                    monthly,
+                    start_date || loan.start_date || loan.loan_date,
+                    due_date !== undefined ? due_date : loan.due_date,
+                    loanId
+                ]
+            );
+            return res.json(result.rows[0]);
+        }
+
+        const result = await db.query(
+            `UPDATE staff_loans
+             SET amount = $1, loan_date = $2, reason = $3, is_paid = $4, updated_at = CURRENT_TIMESTAMP
+             WHERE id = $5
+             RETURNING *`,
+            [
+                amount !== undefined ? parseFloat(amount) : loan.amount,
+                loan_date || loan.loan_date,
+                reason !== undefined ? reason : loan.reason,
+                is_paid !== undefined ? !!is_paid : loan.is_paid,
+                loanId
+            ]
+        );
+        res.json(result.rows[0]);
+    } catch (error) {
+        console.error('Error updating loan:', error);
+        res.status(500).json({ error: 'Failed to update loan.', details: error.message });
+    }
+});
+
+// POST /api/salaries/loans/:loanId/repay - Record a manual (cash) loan repayment
+router.post('/loans/:loanId/repay', authenticate, async (req, res) => {
+    const { loanId } = req.params;
+    const { amount, payment_date, notes, payment_method = 'Cash' } = req.body;
+
+    const payAmount = parseFloat(amount);
+    if (isNaN(payAmount) || payAmount <= 0) {
+        return res.status(400).json({ error: 'A positive repayment amount is required.' });
+    }
+
+    const scheduleReady = await ensureLoanSchedule();
+    if (!scheduleReady) {
+        return res.status(503).json({ error: 'Loan repayment tracking requires migration 002 to be applied.' });
+    }
+
+    const client = await db.getClient();
+    try {
+        await client.query('BEGIN');
+
+        const loanRes = await client.query(
+            'SELECT id, amount, remaining_balance, is_paid FROM staff_loans WHERE id = $1 FOR UPDATE',
+            [loanId]
+        );
+        if (loanRes.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Loan not found.' });
+        }
+
+        const loan = loanRes.rows[0];
+        const outstanding = parseFloat(loan.remaining_balance != null ? loan.remaining_balance : loan.amount);
+        const applied = Math.min(payAmount, outstanding);
+        const newRemaining = Math.max(0, outstanding - applied);
+        const completed = newRemaining <= 0;
+
+        const repayment = await client.query(
+            'INSERT INTO loan_repayments (loan_id, amount, payment_date, notes) VALUES ($1, $2, $3, $4) RETURNING *',
+            [loanId, applied, payment_date || new Date().toISOString().split('T')[0], notes || null]
+        );
+
+        await client.query(
+            `UPDATE staff_loans
+             SET remaining_balance = $1,
+                 is_paid = $2,
+                 status = $3,
+                 completed_at = CASE WHEN $2 THEN CURRENT_TIMESTAMP ELSE completed_at END,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = $4`,
+            [newRemaining, completed, completed ? 'completed' : 'active', loanId]
+        );
+
+        await client.query('COMMIT');
+
+        // A manual repayment is cash coming back in
+        await recordMoneyTransaction({
+            direction: 'IN',
+            amount: applied,
+            category: 'debt_payment',
+            payment_method,
+            reference_type: 'loan_repayment',
+            reference_id: repayment.rows[0].id,
+            description: `Manual repayment on staff loan #${loanId}`,
+            transaction_date: payment_date || null,
+            recorded_by: req.user ? req.user.id : null,
+            approval_id: req.approvalBypassId || null
+        });
+
+        res.status(201).json({
+            message: completed ? 'Repayment recorded — loan fully repaid.' : 'Repayment recorded.',
+            repayment: repayment.rows[0],
+            remaining_balance: newRemaining,
+            is_paid: completed
+        });
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('Error recording loan repayment:', error);
+        res.status(500).json({ error: 'Failed to record loan repayment.', details: error.message });
+    } finally {
+        client.release();
+    }
+});
+
+// GET /api/salaries/loans - Get all loans with filters
 router.get('/loans', async (req, res) => {
     try {
         const {
@@ -700,35 +915,30 @@ router.get('/loans', async (req, res) => {
         } = req.query;
 
         let query = `
-            SELECT 
+            SELECT
                 sl.*,
-                -- Get staff name from appropriate table
-                CASE 
+                CASE
                     WHEN sl.user_id IS NOT NULL THEN u.fullname
                     WHEN sl.staff_member_id IS NOT NULL THEN sm.fullname
                     ELSE 'Unknown Staff'
                 END as borrower_name,
-                -- Get staff role/position from appropriate table
-                CASE 
+                CASE
                     WHEN sl.user_id IS NOT NULL THEN u.role
                     WHEN sl.staff_member_id IS NOT NULL THEN sm.position
                     ELSE 'Unknown Role'
                 END as borrower_role,
-                -- Get email from appropriate table
-                CASE 
+                CASE
                     WHEN sl.user_id IS NOT NULL THEN u.email
                     WHEN sl.staff_member_id IS NOT NULL THEN sm.email
                     ELSE NULL
                 END as borrower_email,
-                -- Staff type for identification
-                CASE 
+                CASE
                     WHEN sl.user_id IS NOT NULL THEN 'user'
                     WHEN sl.staff_member_id IS NOT NULL THEN 'staff_member'
                     ELSE 'unknown'
                 END as staff_type,
                 sp.payment_date as deducted_date
             FROM staff_loans sl
-            -- LEFT JOIN both tables to handle both user and staff member cases
             LEFT JOIN users u ON sl.user_id = u.id
             LEFT JOIN staff_members sm ON sl.staff_member_id = sm.id
             LEFT JOIN salary_payments sp ON sl.deducted_on_payment_id = sp.id
@@ -739,12 +949,11 @@ router.get('/loans', async (req, res) => {
         let paramCount = 1;
 
         if (userId) {
-            // Filter by either user_id OR staff_member_id
             query += ` AND (sl.user_id = $${paramCount} OR sl.staff_member_id = $${paramCount})`;
             params.push(userId);
             paramCount++;
         }
-        
+
         if (status === 'paid') {
             query += ` AND sl.is_paid = true`;
         } else if (status === 'unpaid') {
@@ -763,12 +972,10 @@ router.get('/loans', async (req, res) => {
             paramCount++;
         }
 
-        // Get total count
         const countQuery = `SELECT COUNT(*) FROM (${query}) as count_query`;
         const countResult = await db.query(countQuery, params);
         const totalCount = parseInt(countResult.rows[0].count);
 
-        // Add ordering and pagination
         query += ` ORDER BY sl.loan_date DESC, sl.created_at DESC`;
 
         const offset = (page - 1) * limit;
@@ -793,26 +1000,49 @@ router.get('/loans', async (req, res) => {
     }
 });
 
-// GET /api/salaries/loans/details/:userId - Get details of all outstanding loans for deduction (UPDATED)
+// GET /api/salaries/loans/details/:userId - Outstanding loans for deduction (repayment-schedule aware)
 router.get('/loans/details/:userId', authenticate, async (req, res) => {
     const { userId } = req.params;
     try {
-        const query = `
-            SELECT 
-                sl.id, 
-                sl.amount, 
-                sl.loan_date, 
-                sl.reason,
-                CASE 
-                    WHEN sl.user_id IS NOT NULL THEN 'user'
-                    WHEN sl.staff_member_id IS NOT NULL THEN 'staff_member'
-                    ELSE 'unknown'
-                END as staff_type
-            FROM staff_loans sl
-            WHERE (sl.user_id = $1 OR sl.staff_member_id = $1) 
-              AND sl.is_paid = FALSE
-            ORDER BY sl.loan_date ASC
-        `;
+        const scheduleReady = await ensureLoanSchedule();
+        const query = scheduleReady
+            ? `
+                SELECT
+                    sl.id,
+                    sl.amount,
+                    COALESCE(sl.remaining_balance, sl.amount) AS outstanding,
+                    sl.repayment_months,
+                    COALESCE(sl.monthly_deduction, COALESCE(sl.remaining_balance, sl.amount)) AS monthly_deduction,
+                    sl.start_date,
+                    sl.loan_date,
+                    sl.reason,
+                    CASE
+                        WHEN sl.user_id IS NOT NULL THEN 'user'
+                        WHEN sl.staff_member_id IS NOT NULL THEN 'staff_member'
+                        ELSE 'unknown'
+                    END as staff_type
+                FROM staff_loans sl
+                WHERE (sl.user_id = $1 OR sl.staff_member_id = $1)
+                  AND sl.is_paid = FALSE
+                ORDER BY sl.loan_date ASC
+            `
+            : `
+                SELECT
+                    sl.id,
+                    sl.amount,
+                    sl.amount AS outstanding,
+                    sl.loan_date,
+                    sl.reason,
+                    CASE
+                        WHEN sl.user_id IS NOT NULL THEN 'user'
+                        WHEN sl.staff_member_id IS NOT NULL THEN 'staff_member'
+                        ELSE 'unknown'
+                    END as staff_type
+                FROM staff_loans sl
+                WHERE (sl.user_id = $1 OR sl.staff_member_id = $1)
+                  AND sl.is_paid = FALSE
+                ORDER BY sl.loan_date ASC
+            `;
         const result = await db.query(query, [userId]);
         res.status(200).json(result.rows);
     } catch (error) {
@@ -821,17 +1051,19 @@ router.get('/loans/details/:userId', authenticate, async (req, res) => {
     }
 });
 
-// GET /api/salaries/loans/outstanding/:userId - Get total outstanding loan for a staff member (UPDATED)
+// GET /api/salaries/loans/outstanding/:userId - Total outstanding loan for a staff member
 router.get('/loans/outstanding/:userId', authenticate, async (req, res) => {
     const { userId } = req.params;
     try {
-        const query = `
-            SELECT COALESCE(SUM(sl.amount), 0) AS outstanding_loan_amount
-            FROM staff_loans sl
-            WHERE (sl.user_id = $1 OR sl.staff_member_id = $1) 
-              AND sl.is_paid = FALSE
-        `;
-        const result = await db.query(query, [userId]);
+        const scheduleReady = await ensureLoanSchedule();
+        const sumExpr = scheduleReady ? 'COALESCE(sl.remaining_balance, sl.amount)' : 'sl.amount';
+        const result = await db.query(
+            `SELECT COALESCE(SUM(${sumExpr}), 0) AS outstanding_loan_amount
+             FROM staff_loans sl
+             WHERE (sl.user_id = $1 OR sl.staff_member_id = $1)
+               AND sl.is_paid = FALSE`,
+            [userId]
+        );
         res.status(200).json(result.rows[0]);
     } catch (error) {
         console.error('Error fetching outstanding loan:', error);
@@ -839,6 +1071,70 @@ router.get('/loans/outstanding/:userId', authenticate, async (req, res) => {
     }
 });
 
+// GET /api/salaries/preview-deductions?user_id=&staff_type=
+// Suggested loan installment (from repayment schedules) + outstanding staff credit-sales debt.
+// The salary payment form uses this to prefill loan_deduction and credit_sales_deduction.
+router.get('/preview-deductions', authenticate, async (req, res) => {
+    const staffID = parseInt(req.query.user_id);
+    const isStaffMember = String(req.query.staff_type || '').toLowerCase() === 'staff_member';
+
+    if (!staffID || isNaN(staffID)) {
+        return res.status(400).json({ error: 'user_id is required.' });
+    }
+
+    try {
+        const scheduleReady = await ensureLoanSchedule();
+        const linkReady = await ensureCreditLink();
+        const col = isStaffMember ? 'staff_member_id' : 'user_id';
+
+        const loansQuery = scheduleReady
+            ? `SELECT id, amount,
+                      COALESCE(remaining_balance, amount) AS outstanding,
+                      repayment_months,
+                      COALESCE(monthly_deduction, COALESCE(remaining_balance, amount)) AS monthly_deduction,
+                      start_date, loan_date, due_date, reason
+               FROM staff_loans
+               WHERE ${col} = $1 AND is_paid = FALSE
+               ORDER BY loan_date ASC, id ASC`
+            : `SELECT id, amount, amount AS outstanding, NULL AS repayment_months,
+                      amount AS monthly_deduction, NULL AS start_date, loan_date, NULL AS due_date, reason
+               FROM staff_loans
+               WHERE ${col} = $1 AND is_paid = FALSE
+               ORDER BY loan_date ASC, id ASC`;
+
+        const loans = await db.query(loansQuery, [staffID]);
+        const suggestedLoan = loans.rows.reduce(
+            (sum, l) => sum + Math.min(parseFloat(l.monthly_deduction), parseFloat(l.outstanding)), 0
+        );
+
+        let creditOutstanding = 0;
+        let customerId = null;
+        if (linkReady) {
+            const custRes = await db.query(
+                `SELECT id FROM customers WHERE ${col} = $1 ORDER BY id LIMIT 1`,
+                [staffID]
+            );
+            if (custRes.rows.length > 0) {
+                customerId = custRes.rows[0].id;
+                const cr = await db.query(
+                    'SELECT COALESCE(SUM(balance_due), 0) AS total FROM sales_transactions WHERE customer_id = $1 AND balance_due > 0',
+                    [customerId]
+                );
+                creditOutstanding = parseFloat(cr.rows[0].total);
+            }
+        }
+
+        res.status(200).json({
+            loans: loans.rows,
+            suggested_loan_deduction: Math.round(suggestedLoan * 100) / 100,
+            credit_outstanding: Math.round(creditOutstanding * 100) / 100,
+            customer_id: customerId
+        });
+    } catch (error) {
+        console.error('Error previewing deductions:', error);
+        res.status(500).json({ error: 'Failed to preview deductions.', details: error.message });
+    }
+});
 
 // GET /api/salaries/summary - Get salary summary by period
 router.get('/summary', async (req, res) => {
@@ -870,7 +1166,7 @@ router.get('/summary', async (req, res) => {
         }
 
         const query = `
-            SELECT 
+            SELECT
                 ${groupByClause} as period,
                 TO_CHAR(${groupByClause}, '${dateFormat}') as period_label,
                 COUNT(*) as payment_count,
@@ -914,8 +1210,6 @@ router.get('/filters/options', async (req, res) => {
     }
 });
 
-// Add these routes to your existing salaries.js file
-
 // GET /api/salaries/all-staff - Get all staff with salary information (both users and staff_members)
 router.get('/all-staff', async (req, res) => {
     try {
@@ -929,9 +1223,16 @@ router.get('/all-staff', async (req, res) => {
             staffType
         } = req.query;
 
-        // Query for users
+        const scheduleReady = await ensureLoanSchedule();
+        const userLoanSum = scheduleReady
+            ? `(SELECT COALESCE(SUM(COALESCE(sl.remaining_balance, sl.amount)), 0) FROM staff_loans sl WHERE sl.user_id = u.id AND sl.is_paid = FALSE)`
+            : `(SELECT COALESCE(SUM(sl.amount), 0) FROM staff_loans sl WHERE sl.user_id = u.id AND sl.is_paid = FALSE)`;
+        const staffLoanSum = scheduleReady
+            ? `(SELECT COALESCE(SUM(COALESCE(sl.remaining_balance, sl.amount)), 0) FROM staff_loans sl WHERE sl.staff_member_id = sm.id AND sl.is_paid = FALSE)`
+            : `(SELECT COALESCE(SUM(sl.amount), 0) FROM staff_loans sl WHERE sl.staff_member_id = sm.id AND sl.is_paid = FALSE)`;
+
         let usersQuery = `
-            SELECT 
+            SELECT
                 u.id, u.username, u.fullname, u.email, u.phone_number, u.role, u.is_active,
                 'user' as staff_type,
                 COALESCE(ss.base_salary, 0) as base_salary,
@@ -940,23 +1241,22 @@ router.get('/all-staff', async (req, res) => {
                 COALESCE(ss.net_salary, 0) as net_salary,
                 ss.salary_type,
                 ss.bank_name,
-                ss.bank_account_name, -- Add this
+                ss.bank_account_name,
                 ss.account_number,
                 ss.tax_rate,
                 ss.pension_rate,
                 ss.is_active as salary_active,
                 (SELECT COUNT(*) FROM salary_payments sp WHERE sp.user_id = u.id AND sp.status = 'paid') as total_payments,
                 (SELECT MAX(payment_date) FROM salary_payments sp WHERE sp.user_id = u.id AND sp.status = 'paid') as last_payment_date,
-                (SELECT COALESCE(SUM(sl.amount), 0) FROM staff_loans sl WHERE sl.user_id = u.id AND sl.is_paid = FALSE) as outstanding_loan_amount
+                ${userLoanSum} as outstanding_loan_amount
             FROM users u
             LEFT JOIN staff_salaries ss ON u.id = ss.user_id
             WHERE u.is_active = $1
         `;
 
-        // Query for staff members
         let staffMembersQuery = `
-            SELECT 
-                sm.id, '' as username, sm.fullname, sm.email, sm.phone_number, 
+            SELECT
+                sm.id, '' as username, sm.fullname, sm.email, sm.phone_number,
                 COALESCE(sm.position, 'staff') as role, sm.is_active,
                 'staff_member' as staff_type,
                 COALESCE(ss.base_salary, 0) as base_salary,
@@ -965,14 +1265,14 @@ router.get('/all-staff', async (req, res) => {
                 COALESCE(ss.net_salary, 0) as net_salary,
                 ss.salary_type,
                 ss.bank_name,
-                ss.bank_account_name, -- Add this
+                ss.bank_account_name,
                 ss.account_number,
                 ss.tax_rate,
                 ss.pension_rate,
                 ss.is_active as salary_active,
                 (SELECT COUNT(*) FROM salary_payments sp WHERE sp.staff_member_id = sm.id AND sp.status = 'paid') as total_payments,
                 (SELECT MAX(payment_date) FROM salary_payments sp WHERE sp.staff_member_id = sm.id AND sp.status = 'paid') as last_payment_date,
-                (SELECT COALESCE(SUM(sl.amount), 0) FROM staff_loans sl WHERE sl.staff_member_id = sm.id AND sl.is_paid = FALSE) as outstanding_loan_amount
+                ${staffLoanSum} as outstanding_loan_amount
             FROM staff_members sm
             LEFT JOIN staff_salaries ss ON sm.id = ss.staff_member_id
             WHERE sm.is_active = $1
@@ -983,23 +1283,22 @@ router.get('/all-staff', async (req, res) => {
         let userParamCount = 2;
         let staffParamCount = 2;
 
-        // Add filters to both queries
-        const addFilters = (query, params, paramCount, staffType) => {
-            if (role && staffType !== 'staff_member') {
+        const addFilters = (query, params, paramCount, forStaffType) => {
+            if (role && forStaffType !== 'staff_member') {
                 query += ` AND u.role = $${paramCount}`;
                 params.push(role);
                 paramCount++;
-            } else if (role && staffType === 'staff_member') {
+            } else if (role && forStaffType === 'staff_member') {
                 query += ` AND sm.position = $${paramCount}`;
                 params.push(role);
                 paramCount++;
             }
 
-            if (search && staffType !== 'staff_member') {
+            if (search && forStaffType !== 'staff_member') {
                 query += ` AND (u.fullname ILIKE $${paramCount} OR u.email ILIKE $${paramCount} OR u.username ILIKE $${paramCount})`;
                 params.push(`%${search}%`);
                 paramCount++;
-            } else if (search && staffType === 'staff_member') {
+            } else if (search && forStaffType === 'staff_member') {
                 query += ` AND (sm.fullname ILIKE $${paramCount} OR sm.email ILIKE $${paramCount})`;
                 params.push(`%${search}%`);
                 paramCount++;
@@ -1026,26 +1325,22 @@ router.get('/all-staff', async (req, res) => {
             return { query, params, paramCount };
         };
 
-        // Apply filters to both queries
         let usersResult = addFilters(usersQuery, userParams, userParamCount, 'user');
         let staffResult = addFilters(staffMembersQuery, staffParams, staffParamCount, 'staff_member');
 
         usersQuery = usersResult.query + ` ORDER BY u.fullname`;
         staffMembersQuery = staffResult.query + ` ORDER BY sm.fullname`;
 
-        // Execute queries
         const [usersData, staffMembersData] = await Promise.all([
             db.query(usersQuery, usersResult.params),
             db.query(staffMembersQuery, staffResult.params)
         ]);
 
-        // Combine results
         let allStaff = [
             ...usersData.rows,
             ...staffMembersData.rows
         ];
 
-        // Filter by staff type if specified
         if (staffType) {
             allStaff = allStaff.filter(staff => staff.staff_type === staffType);
         }
@@ -1057,360 +1352,9 @@ router.get('/all-staff', async (req, res) => {
     }
 });
 
-// routes/salaries.js
-
-// POST /api/salaries/staff/:type/:id/salary - FIXED AND CONSOLIDATED VERSION
-// router.post('/staff/:type/:id/salary', authenticate, async (req, res) => {
-//     const { type, id } = req.params;
-//     const {
-//         base_salary,
-//         allowances,
-//         deductions,
-//         salary_type,
-//         bank_name,
-//         bank_account_name,
-//         account_number,
-//         tax_rate,
-//         pension_rate
-//     } = req.body;
-
-//     try {
-//         const staffId = parseInt(id);
-        
-//         // 1. Determine which column to use (user_id or staff_member_id)
-//         const idColumn = type === 'user' ? 'user_id' : 'staff_member_id';
-        
-//         // Simple validation
-//         if (!['user', 'staff_member'].includes(type) || isNaN(staffId)) {
-//             return res.status(400).json({ error: 'Invalid staff type or ID.' });
-//         }
-
-//         // 2. Prepare values and calculate net salary (as before)
-//         const netSalary = (parseFloat(base_salary) || 0) + 
-//                          (parseFloat(allowances) || 0) - 
-//                          (parseFloat(deductions) || 0);
-
-//         const values = [
-//             parseFloat(base_salary) || 0,
-//             parseFloat(allowances) || 0,
-//             parseFloat(deductions) || 0,
-//             netSalary,
-//             salary_type || 'monthly',
-//             bank_name || '',
-//             bank_account_name || '',
-//             account_number || '',
-//             parseFloat(tax_rate) || 0,
-//             parseFloat(pension_rate) || 0
-//         ];
-        
-//         // 3. Check for existing record first
-//         const existingSalaryResult = await db.query(
-//             `SELECT * FROM staff_salaries WHERE ${idColumn} = $1`, [staffId]
-//         );
-
-//         let result;
-
-//         if (existingSalaryResult.rows.length > 0) {
-//             // UPDATE query if record exists
-//             let updateQuery = `
-//                 UPDATE staff_salaries 
-//                 SET base_salary = $1, allowances = $2, deductions = $3, net_salary = $4,
-//                     salary_type = $5, bank_name = $6, bank_account_name = $7, account_number = $8,
-//                     tax_rate = $9, pension_rate = $10, updated_at = CURRENT_TIMESTAMP
-//                 WHERE ${idColumn} = $11
-//                 RETURNING *
-//             `;
-//             const updateValues = [...values, staffId];
-//             result = await db.query(updateQuery, updateValues);
-//             console.log('Salary updated successfully.');
-
-//         } else {
-//             // INSERT query if no record exists
-//             let insertQuery = `
-//                 INSERT INTO staff_salaries (
-//                     ${idColumn}, base_salary, allowances, deductions, net_salary,
-//                     salary_type, bank_name, bank_account_name, account_number, tax_rate, pension_rate
-//                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-//                 RETURNING *
-//             `;
-//             const insertValues = [staffId, ...values]; // staffId goes first for INSERT
-//             result = await db.query(insertQuery, insertValues);
-//             console.log('Salary inserted successfully.');
-//         }
-
-//         res.status(200).json(result.rows[0]);
-
-//     } catch (error) {
-//         console.error('Salary update error:', error);
-//         // Include the actual error message from the database in the response
-//         res.status(500).json({ 
-//             error: 'Failed to update salary structure. Check database logs.',
-//             details: error.message,
-//             hint: `The issue is likely that the column '${idColumn}' is missing or named incorrectly in your staff_salaries table, or a foreign key constraint is failing.`
-//         });
-//     }
-// });
-
-// routes/salaries.js
-
-// PUT /api/salaries/staff/:staffType/:staffId/salary - Update or Insert salary structure
-// router.put('/staff/:staffType/:staffId/salary', authenticate.verifyToken, authenticate.checkRole(['admin', 'manager', 'accountant']), async (req, res) => {
-//     const { staffId } = req.params;
-    
-//     // Safely extract and default text fields to '' to prevent errors if they are missing/undefined in req.body
-//     const {
-//         base_salary, 
-//         allowances, 
-//         deductions, 
-//         salary_type = 'monthly', // Default to 'monthly' if missing
-//         bank_name = '', 
-//         bank_account_name = '', // Crucially, ensure this defaults to ''
-//         account_number = '', 
-//         tax_rate, 
-//         pension_rate
-//     } = req.body;
-
-//     if (!base_salary || !staffId) {
-//         return res.status(400).json({ error: 'Base salary and staff ID are required.' });
-//     }
-
-//     try {
-//         // Parse all numeric fields to prevent database conversion errors
-//         const parsedBaseSalary = parseFloat(base_salary) || 0;
-//         const parsedAllowances = parseFloat(allowances) || 0;
-//         const parsedDeductions = parseFloat(deductions) || 0;
-//         const parsedTaxRate = parseFloat(tax_rate) || 0;
-//         const parsedPensionRate = parseFloat(pension_rate) || 0;
-
-//         // Calculate net salary
-//         const net_salary = parsedBaseSalary + parsedAllowances - parsedDeductions;
-
-//         // The values array (10 elements: $1 to $10 in UPDATE, $2 to $11 in INSERT)
-//         const values = [
-//             parsedBaseSalary,
-//             parsedAllowances,
-//             parsedDeductions,
-//             salary_type,
-//             bank_name,
-//             bank_account_name, 
-//             account_number,
-//             parsedTaxRate,
-//             parsedPensionRate,
-//             net_salary
-//         ];
-
-//         // SQL Queries (ensuring parameter counts are correct)
-//         let updateQuery = `
-//             UPDATE staff_salaries
-//             SET
-//                 base_salary = $1, allowances = $2, deductions = $3, salary_type = $4,
-//                 bank_name = $5, bank_account_name = $6, account_number = $7,
-//                 tax_rate = $8, pension_rate = $9, net_salary = $10,
-//                 updated_at = CURRENT_TIMESTAMP
-//             WHERE user_id = $11
-//             RETURNING *
-//         `;
-
-//         let insertQuery = `
-//             INSERT INTO staff_salaries (
-//                 user_id, base_salary, allowances, deductions, salary_type, bank_name,
-//                 bank_account_name, account_number, tax_rate, pension_rate, net_salary
-//             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-//             RETURNING *
-//         `;
-
-//         // Try to update first
-//         // updateValues = [value1, ..., value10, staffId] (11 params)
-//         const updateValues = [...values, staffId]; 
-//         const updateResult = await db.query(updateQuery, updateValues);
-
-//         if (updateResult.rows.length > 0) {
-//             // Update successful
-//             res.status(200).json(updateResult.rows[0]);
-//         } else {
-//             // No existing record, insert new one
-//             // insertValues = [staffId, value1, ..., value10] (11 params)
-//             const insertValues = [staffId, ...values]; 
-//             const insertResult = await db.query(insertQuery, insertValues);
-
-//             res.status(200).json(insertResult.rows[0]);
-//         }
-
-//     } catch (error) {
-//         console.error('Salary update error:', error);
-//         // Return a detailed error message if possible (helpful for debugging)
-//         res.status(500).json({ 
-//             error: 'Failed to update salary',
-//             details: error.message
-//         });
-//     }
-// });
-
-// POST /api/salaries/staff/staff_member/:id/salary - Update staff salary
-
-// POST /api/salaries/staff/staff_member/:id/salary
-// Accepts body: { base_salary, allowances, deductions, salary_type, bank_name, bank_account_name, account_number, tax_rate, pension_rate, staff_type? }
-// staff_type (optional) should be "user" or "staff_member". If omitted and id exists in exactly one table we auto-pick.
-// If id exists in BOTH tables and staff_type is omitted -> 400 (client must disambiguate).
-
-// router.post('/staff/staff_member/:id/salary', async (req, res) => {
-//   const { id } = req.params;
-//   const {
-//     base_salary,
-//     allowances,
-//     deductions,
-//     salary_type,
-//     bank_name,
-//     bank_account_name,
-//     account_number,
-//     tax_rate,
-//     pension_rate,
-//     staff_type // optional: 'user' or 'staff_member'
-//   } = req.body;
-
-//   try {
-//     // normalize staff_type if provided
-//     let requestedType = staff_type ? String(staff_type).toLowerCase() : null;
-//     if (requestedType && !['user', 'staff_member'].includes(requestedType)) {
-//       return res.status(400).json({ error: 'staff_type must be "user" or "staff_member" if provided.' });
-//     }
-
-//     // check existence in both tables
-//     const [uRes, sRes] = await Promise.all([
-//       db.query('SELECT id FROM users WHERE id = $1', [id]),
-//       db.query('SELECT id FROM staff_members WHERE id = $1', [id])
-//     ]);
-
-//     const existsInUsers = uRes.rows.length > 0;
-//     const existsInStaffMembers = sRes.rows.length > 0;
-
-//     if (!existsInUsers && !existsInStaffMembers) {
-//       return res.status(404).json({ error: 'ID not found in users or staff_members.' });
-//     }
-
-//     // Disambiguation policy:
-//     // 1) If client provided staff_type, use it (but ensure the id exists in that table).
-//     // 2) Else if id exists in exactly one table, use that.
-//     // 3) Else (exists in both and no staff_type) -> return 400 asking client to disambiguate.
-//     let finalType = null;
-//     if (requestedType) {
-//       if (requestedType === 'user' && !existsInUsers) {
-//         return res.status(400).json({ error: 'staff_type "user" provided but id not found in users.' });
-//       }
-//       if (requestedType === 'staff_member' && !existsInStaffMembers) {
-//         return res.status(400).json({ error: 'staff_type "staff_member" provided but id not found in staff_members.' });
-//       }
-//       finalType = requestedType;
-//     } else {
-//       if (existsInUsers && !existsInStaffMembers) finalType = 'user';
-//       else if (existsInStaffMembers && !existsInUsers) finalType = 'staff_member';
-//       else {
-//         // exists in both, and no disambiguation provided — force client to choose
-//         return res.status(400).json({
-//           error: 'Ambiguous id: record exists in both users and staff_members. Provide staff_type in request body ("user" or "staff_member").'
-//         });
-//       }
-//     }
-
-//     // compute net salary
-//     const netSalary =
-//       parseFloat(base_salary || 0) +
-//       parseFloat(allowances || 0) -
-//       parseFloat(deductions || 0);
-
-//     let query, params;
-
-//     if (finalType === 'user') {
-//       // Upsert by user_id (unique constraint staff_salaries_user_id_key)
-//       query = `
-//         INSERT INTO staff_salaries (
-//           user_id, staff_member_id, base_salary, allowances, deductions,
-//           net_salary, salary_type, bank_name, bank_account_name,
-//           account_number, tax_rate, pension_rate, updated_at
-//         ) VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, CURRENT_TIMESTAMP)
-//         ON CONFLICT (user_id)
-//         DO UPDATE SET
-//           base_salary = EXCLUDED.base_salary,
-//           allowances = EXCLUDED.allowances,
-//           deductions = EXCLUDED.deductions,
-//           net_salary = EXCLUDED.net_salary,
-//           salary_type = EXCLUDED.salary_type,
-//           bank_name = EXCLUDED.bank_name,
-//           bank_account_name = EXCLUDED.bank_account_name,
-//           account_number = EXCLUDED.account_number,
-//           tax_rate = EXCLUDED.tax_rate,
-//           pension_rate = EXCLUDED.pension_rate,
-//           updated_at = CURRENT_TIMESTAMP
-//         RETURNING *;
-//       `;
-//       params = [
-//         id,
-//         parseFloat(base_salary || 0),
-//         parseFloat(allowances || 0),
-//         parseFloat(deductions || 0),
-//         netSalary,
-//         salary_type,
-//         bank_name,
-//         bank_account_name,
-//         account_number,
-//         parseFloat(tax_rate || 0),
-//         parseFloat(pension_rate || 0)
-//       ];
-//     } else {
-//       // finalType === 'staff_member'
-//       // Upsert by staff_member_id (unique constraint staff_salaries_staff_member_id_key)
-//       query = `
-//         INSERT INTO staff_salaries (
-//           user_id, staff_member_id, base_salary, allowances, deductions,
-//           net_salary, salary_type, bank_name, bank_account_name,
-//           account_number, tax_rate, pension_rate, updated_at
-//         ) VALUES (NULL, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, CURRENT_TIMESTAMP)
-//         ON CONFLICT (staff_member_id)
-//         DO UPDATE SET
-//           base_salary = EXCLUDED.base_salary,
-//           allowances = EXCLUDED.allowances,
-//           deductions = EXCLUDED.deductions,
-//           net_salary = EXCLUDED.net_salary,
-//           salary_type = EXCLUDED.salary_type,
-//           bank_name = EXCLUDED.bank_name,
-//           bank_account_name = EXCLUDED.bank_account_name,
-//           account_number = EXCLUDED.account_number,
-//           tax_rate = EXCLUDED.tax_rate,
-//           pension_rate = EXCLUDED.pension_rate,
-//           updated_at = CURRENT_TIMESTAMP
-//         RETURNING *;
-//       `;
-//       params = [
-//         id,
-//         parseFloat(base_salary || 0),
-//         parseFloat(allowances || 0),
-//         parseFloat(deductions || 0),
-//         netSalary,
-//         salary_type,
-//         bank_name,
-//         bank_account_name,
-//         account_number,
-//         parseFloat(tax_rate || 0),
-//         parseFloat(pension_rate || 0)
-//       ];
-//     }
-
-//     const result = await db.query(query, params);
-//     return res.status(200).json(result.rows[0]);
-
-//   } catch (err) {
-//     console.error('Salary upsert error:', err);
-//     return res.status(500).json({ error: 'Failed to save salary', details: err.message });
-//   }
-// });
-
-// routes/salaries.js
-
-// 🚨 REMOVE the old, static route: router.post('/staff/staff_member/:id/salary', async (req, res) => { ... });
-
-// 🚀 ADD this new, dynamic, and robust route:
+// POST /api/salaries/staff/:type/:id/salary - Upsert a salary structure for a user or staff member
 router.post('/staff/:type/:id/salary', async (req, res) => {
-  const { type, id } = req.params; // <-- We now correctly use the dynamic type
+  const { type, id } = req.params;
   const {
     base_salary,
     allowances,
@@ -1425,12 +1369,11 @@ router.post('/staff/:type/:id/salary', async (req, res) => {
 
   try {
     const staffId = parseInt(id);
-    
-    // 1. Validate type and determine which column to use
+
     let idColumn;
     let user_id_value = null;
     let staff_member_id_value = null;
-    
+
     const staffType = String(type).toLowerCase();
 
     if (staffType === 'user') {
@@ -1443,20 +1386,18 @@ router.post('/staff/:type/:id/salary', async (req, res) => {
       return res.status(400).json({ error: 'Invalid staff type provided in the URL path.' });
     }
 
-    // 2. Compute net salary
     const netSalary =
       parseFloat(base_salary || 0) +
       parseFloat(allowances || 0) -
       parseFloat(deductions || 0);
 
-    // 3. Use a single dynamic UPSERT query
     const query = `
       INSERT INTO staff_salaries (
         user_id, staff_member_id, base_salary, allowances, deductions,
         net_salary, salary_type, bank_name, bank_account_name,
         account_number, tax_rate, pension_rate, updated_at
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CURRENT_TIMESTAMP)
-      ON CONFLICT (${idColumn})                                    /* Use the correct column for CONFLICT */
+      ON CONFLICT (${idColumn})
       DO UPDATE SET
         base_salary = EXCLUDED.base_salary,
         allowances = EXCLUDED.allowances,
@@ -1471,11 +1412,10 @@ router.post('/staff/:type/:id/salary', async (req, res) => {
         updated_at = CURRENT_TIMESTAMP
       RETURNING *;
     `;
-    
-    // Parameters: $1=user_id, $2=staff_member_id, then $3 through $12 are the salary details
+
     const params = [
-      user_id_value,         // $1: ID of user (or null)
-      staff_member_id_value, // $2: ID of staff_member (or null)
+      user_id_value,
+      staff_member_id_value,
       parseFloat(base_salary || 0),
       parseFloat(allowances || 0),
       parseFloat(deductions || 0),

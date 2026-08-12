@@ -4,6 +4,7 @@ const router = express.Router();
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const db = require('../db/db');
+const config = require('../config');
 
 // Registration route with new fields
 router.post('/register', async (req, res) => {
@@ -22,9 +23,8 @@ router.post('/register', async (req, res) => {
   }
 });
 
-// Login route (no changes needed here)
+// Login route
 router.post('/login', async (req, res) => {
-  // ... (code remains the same)
   const { username, password } = req.body;
   try {
     const user = await db.query('SELECT * FROM users WHERE username = $1', [username]);
@@ -37,10 +37,14 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ message: 'Invalid username or password' });
     }
 
+    if (user.rows[0].is_active === false) {
+      return res.status(403).json({ message: 'This account has been deactivated. Please contact an administrator.' });
+    }
+
     const token = jwt.sign(
       { id: user.rows[0].id, username: user.rows[0].username, role: user.rows[0].role }, // payload
-      process.env.JWT_SECRET || 'supersecretkey',
-      { expiresIn: '7d' } // <-- Set to 7 days, or as long as you want
+      config.JWT_SECRET,
+      { expiresIn: '7d' }
     );
 
     res.status(200).json({
@@ -50,7 +54,7 @@ router.post('/login', async (req, res) => {
       user: {
         id: user.rows[0].id,
         username: user.rows[0].username,
-        full_name: user.rows[0].fullname, // or fullname, depending on your DB
+        full_name: user.rows[0].fullname,
         email: user.rows[0].email,
         phone_number: user.rows[0].phone_number,
         gender: user.rows[0].gender,
