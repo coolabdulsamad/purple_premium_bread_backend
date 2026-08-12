@@ -46,6 +46,7 @@ const moneyRoutes = require('./routes/money');
 const returnsRoutes = require('./routes/returns');
 const walletsRoutes = require('./routes/wallets');
 const aiAssistantRoutes = require('./routes/aiAssistant');
+const chatRoutes = require('./routes/chat');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -106,6 +107,7 @@ app.use('/api/money', moneyRoutes);
 app.use('/api/returns', returnsRoutes);
 app.use('/api/wallets', walletsRoutes);
 app.use('/api/ai', aiAssistantRoutes);
+app.use('/api/chat', chatRoutes);
 
 // Simple test route
 app.get('/', (req, res) => {
