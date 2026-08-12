@@ -69,6 +69,62 @@ router.post('/', async (req, res) => {
     }
 });
 
+// PUT /api/users/me - Update the logged-in user's own profile
+// Editable: fullname, email, phone_number, gender. Role/username/is_active are NOT editable here.
+// Optional password change requires the current password for verification.
+router.put('/me', authenticate, async (req, res) => {
+    const userId = req.user.id;
+    const { fullname, email, phone_number, gender, current_password, new_password } = req.body;
+
+    try {
+        if (new_password) {
+            if (!current_password) {
+                return res.status(400).json({ error: 'Current password is required to set a new password.' });
+            }
+            if (String(new_password).length < 6) {
+                return res.status(400).json({ error: 'New password must be at least 6 characters.' });
+            }
+            const pwResult = await db.query('SELECT password FROM users WHERE id = $1', [userId]);
+            if (pwResult.rows.length === 0) {
+                return res.status(404).json({ error: 'User not found.' });
+            }
+            const matches = await bcrypt.compare(current_password, pwResult.rows[0].password);
+            if (!matches) {
+                return res.status(401).json({ error: 'Current password is incorrect.' });
+            }
+        }
+
+        let query = `
+            UPDATE users
+            SET fullname = $1, email = $2, phone_number = $3, gender = $4, updated_at = NOW()
+        `;
+        const params = [fullname, email, phone_number, gender];
+
+        if (new_password) {
+            const salt = await bcrypt.genSalt(10);
+            const hashedPassword = await bcrypt.hash(new_password, salt);
+            query += `, password = $5`;
+            params.push(hashedPassword);
+        }
+
+        query += ` WHERE id = $${params.length + 1}
+                   RETURNING id, fullname, username, email, phone_number, gender, role, created_at, updated_at`;
+        params.push(userId);
+
+        const result = await db.query(query, params);
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'User not found.' });
+        }
+        res.status(200).json(result.rows[0]);
+    } catch (error) {
+        console.error('Error updating own profile:', error);
+        if (error.code === '23505') {
+            return res.status(409).json({ error: 'Email already exists.' });
+        }
+        res.status(500).json({ error: 'Failed to update profile.', details: error.message });
+    }
+});
+
 // PUT /api/users/:id - Update an existing user
 router.put('/:id', async (req, res) => {
     const { id } = req.params;
