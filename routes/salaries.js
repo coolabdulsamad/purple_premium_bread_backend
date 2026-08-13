@@ -46,6 +46,31 @@ async function ensureCreditLink() {
     return creditLinkReady;
 }
 
+// Find the customer record linked to a user / staff member; auto-provision one
+// (staff are customers too - they can buy bread on credit) when none exists.
+async function getOrCreateStaffCustomer(client, staffID, isStaffMember) {
+    const linkCol = isStaffMember ? 'staff_member_id' : 'user_id';
+    const found = await client.query(
+        `SELECT id FROM customers WHERE ${linkCol} = $1 ORDER BY id LIMIT 1 FOR UPDATE`,
+        [staffID]
+    );
+    if (found.rows.length > 0) return found.rows[0].id;
+
+    const src = isStaffMember
+        ? await client.query('SELECT fullname, phone_number, email FROM staff_members WHERE id = $1', [staffID])
+        : await client.query('SELECT fullname, phone_number, email FROM users WHERE id = $1', [staffID]);
+    if (src.rows.length === 0) return null;
+
+    const p = src.rows[0];
+    const ins = await client.query(
+        `INSERT INTO customers (fullname, phone, email, balance, advance_balance, credit_limit, is_active, is_rider, ${linkCol})
+         VALUES ($1, $2, $3, 0, 0, 0, true, false, $4)
+         RETURNING id`,
+        [p.fullname || `Staff #${staffID}`, p.phone_number || null, p.email || null, staffID]
+    );
+    return ins.rows[0].id;
+}
+
 // GET /api/salaries/staff - Get all staff with salary information
 router.get('/staff', async (req, res) => {
     try {
@@ -345,7 +370,8 @@ router.post('/payments', authenticate, async (req, res) => {
         notes,
         loan_deduction,
         loan_ids,
-        credit_sales_deduction
+        credit_sales_deduction,
+        sale_ids
     } = req.body;
 
     if (!user_id || !payment_date || !base_salary || !net_amount) {
@@ -495,12 +521,20 @@ router.post('/payments', authenticate, async (req, res) => {
 
             if (custRes.rows.length > 0) {
                 const staffCustomerId = custRes.rows[0].id;
-                const unpaidSales = await client.query(
-                    `SELECT id, balance_due FROM sales_transactions
-                     WHERE customer_id = $1 AND balance_due > 0
-                     ORDER BY due_date ASC NULLS LAST, sale_date ASC, id ASC FOR UPDATE`,
-                    [staffCustomerId]
-                );
+                const saleIdList = Array.isArray(sale_ids) ? sale_ids.map(Number).filter((n) => !isNaN(n) && n > 0) : [];
+                const unpaidSales = saleIdList.length > 0
+                    ? await client.query(
+                        `SELECT id, balance_due FROM sales_transactions
+                         WHERE customer_id = $1 AND balance_due > 0 AND id = ANY($2)
+                         ORDER BY due_date ASC NULLS LAST, sale_date ASC, id ASC FOR UPDATE`,
+                        [staffCustomerId, saleIdList]
+                    )
+                    : await client.query(
+                        `SELECT id, balance_due FROM sales_transactions
+                         WHERE customer_id = $1 AND balance_due > 0
+                         ORDER BY due_date ASC NULLS LAST, sale_date ASC, id ASC FOR UPDATE`,
+                        [staffCustomerId]
+                    );
 
                 let remainingCredit = creditSalesDeduction;
                 for (const sale of unpaidSales.rows) {
@@ -1133,6 +1167,61 @@ router.get('/preview-deductions', authenticate, async (req, res) => {
     } catch (error) {
         console.error('Error previewing deductions:', error);
         res.status(500).json({ error: 'Failed to preview deductions.', details: error.message });
+    }
+});
+
+// GET /api/salaries/credit-sales?user_id=&staff_type=
+// Lists the staff member's unpaid credit sales (bread they bought as a customer)
+// so the salary form can let the admin select which sales to deduct from salary.
+// Auto-provisions a linked customer record for the staff member if none exists.
+router.get('/credit-sales', authenticate, async (req, res) => {
+    const staffID = parseInt(req.query.user_id);
+    const isStaffMember = String(req.query.staff_type || '').toLowerCase() === 'staff_member';
+
+    if (!staffID || isNaN(staffID)) {
+        return res.status(400).json({ error: 'user_id is required.' });
+    }
+
+    try {
+        const linkReady = await ensureCreditLink();
+        if (!linkReady) {
+            return res.status(200).json({ customer_id: null, credit_sales: [], total_outstanding: 0, link_ready: false });
+        }
+
+        const client = await db.getClient();
+        try {
+            await client.query('BEGIN');
+            const customerId = await getOrCreateStaffCustomer(client, staffID, isStaffMember);
+            await client.query('COMMIT');
+
+            if (!customerId) {
+                return res.status(404).json({ error: 'Staff member not found.' });
+            }
+
+            const sales = await db.query(
+                `SELECT id, sale_date, due_date, total_amount, amount_paid, balance_due, status, payment_method
+                 FROM sales_transactions
+                 WHERE customer_id = $1 AND balance_due > 0
+                 ORDER BY due_date ASC NULLS LAST, sale_date ASC, id ASC`,
+                [customerId]
+            );
+            const total = sales.rows.reduce((sum, r) => sum + parseFloat(r.balance_due), 0);
+
+            res.status(200).json({
+                customer_id: customerId,
+                credit_sales: sales.rows,
+                total_outstanding: Math.round(total * 100) / 100,
+                link_ready: true
+            });
+        } catch (e) {
+            await client.query('ROLLBACK');
+            throw e;
+        } finally {
+            client.release();
+        }
+    } catch (error) {
+        console.error('Error fetching staff credit sales:', error);
+        res.status(500).json({ error: 'Failed to fetch staff credit sales.', details: error.message });
     }
 });
 
