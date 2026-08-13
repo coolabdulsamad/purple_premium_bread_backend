@@ -56,7 +56,12 @@ const PORT = process.env.PORT || 5000;
 
 // Middleware
 app.use(cors({
-    origin: ['https://purple-premium-bread.vercel.app', 'http://localhost:5173'],
+    origin: [
+        'https://purple-premium-bread.vercel.app',
+        'https://purple-premium-bread.company',
+        'https://www.purple-premium-bread.company',
+        'http://localhost:5173'
+    ],
     credentials: true
 }));
 
