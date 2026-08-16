@@ -48,6 +48,7 @@ const walletsRoutes = require('./routes/wallets');
 const aiAssistantRoutes = require('./routes/aiAssistant');
 const chatRoutes = require('./routes/chat');
 const whatsappRoutes = require('./routes/whatsapp');
+const telegramRoutes = require('./routes/telegram');
 const settingsRoutes = require('./routes/settings');
 const auditLogsRoutes = require('./routes/auditLogs');
 
@@ -68,9 +69,10 @@ app.use(cors({
 app.use(express.json());
 app.use(fileUpload());
 
-// WhatsApp Cloud API: the webhook must stay open (Meta calls it with no JWT; it
-// self-verifies via the verify token), so it is mounted BEFORE the governance
-// layer. Its link endpoints run their own authenticate middleware internally.
+// Telegram + WhatsApp Cloud API: webhooks must stay open (the platforms call
+// them with no JWT), so they are mounted BEFORE the governance layer. Their
+// link endpoints run their own authenticate middleware internally.
+app.use('/api/telegram', telegramRoutes);
 app.use('/api/whatsapp', whatsappRoutes);
 
 // --- Security & governance layer (order matters) ---
