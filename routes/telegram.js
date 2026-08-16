@@ -127,37 +127,6 @@ async function getUser(userId) {
 }
 
 // ---------------------------------------------------------------------------
-// Main menu — filtered by the user's role permissions (admin Permissions page)
-// ---------------------------------------------------------------------------
-const MENU_ITEMS = [
-    { key: 'dashboard', label: 'Dashboard summary', perm: 'dashboard.view' },
-    { key: 'sales', label: 'Sales', perm: 'sales.view' },
-    { key: 'customers', label: 'Customers & debts', perm: 'customers.view' },
-    { key: 'products', label: 'Products & prices', perm: 'products.view' },
-    { key: 'payment', label: 'Record a payment', perm: 'payments.create' },
-    { key: 'expenses', label: 'Expenses', perm: 'expenses.view' },
-    { key: 'riders', label: 'Riders', perm: 'riders.view' },
-    { key: 'reports', label: 'Reports (sales vs expenses)', perm: 'reports.view' },
-    { key: 'chat', label: 'Team Chat inbox', perm: 'chat.view' },
-    { key: 'ai', label: 'Ask the assistant', perm: 'ai_assistant.view' },
-];
-
-async function buildMenu(role) {
-    const options = [];
-    for (const item of MENU_ITEMS) {
-        if (await checkPermission(role, item.perm)) options.push(item);
-    }
-    return options;
-}
-
-function menuText(user, options) {
-    let t = `*Purple Premium Bread* — Telegram\nHello ${esc(user.fullname)} (${esc(user.role)}). What would you like to do?\n`;
-    options.forEach((o, i) => { t += `\n${i + 1}. ${o.label}`; });
-    t += `\n\nReply with a number. Send *0* anytime to return to this menu, or *logout* to unlink this account.`;
-    return t;
-}
-
-// ---------------------------------------------------------------------------
 // Shared query snippets
 // ---------------------------------------------------------------------------
 const PERIODS = {
@@ -306,6 +275,314 @@ async function redeemLoginCode(chatId, code) {
 }
 
 // ---------------------------------------------------------------------------
+// Menu system — mirrors the app sidebar, filtered by role permissions.
+// Top level = sidebar groups; each group opens a numbered sub-menu.
+// ---------------------------------------------------------------------------
+const MENU_GROUPS = [
+    { key: 'dashboard', label: '📊 Dashboard summary', perm: 'dashboard.view' },
+    {
+        key: 'sub_sales', label: '🛒 Sales', items: [
+            { key: 'sales_summary', label: 'Sales summary (today / week / month)', perm: 'sales.view' },
+            { key: 'sales_history', label: 'Sales history — all sales (More pages)', perm: 'sales.view' },
+            { key: 'sale_find', label: 'Find a sale by number', perm: 'sales.view' },
+            { key: 'returns', label: 'Sales returns (More pages)', perm: 'returns.view' },
+            { key: 'exchanges', label: 'Exchanges (More pages)', perm: 'exchanges.view' },
+        ]
+    },
+    {
+        key: 'sub_production', label: '🍞 Production & Products', items: [
+            { key: 'production', label: 'Production summary (today / week / month)', perm: 'production.view' },
+            { key: 'production_log', label: 'Production history (More pages)', perm: 'production.view' },
+            { key: 'products', label: 'Products & prices', perm: 'products.view' },
+            { key: 'stock', label: 'Product stock levels (More pages)', perm: 'inventory.view' },
+            { key: 'recipes', label: 'Recipes (ingredients per product)', perm: 'recipes.view' },
+        ]
+    },
+    {
+        key: 'sub_inventory', label: '📦 Raw Materials & Inventory', items: [
+            { key: 'raw_materials', label: 'Raw materials stock (More pages)', perm: 'raw_materials.view' },
+            { key: 'materials_low', label: 'Low-stock materials', perm: 'raw_materials.view' },
+            { key: 'waste', label: 'Waste stock (More pages)', perm: 'inventory.view' },
+            { key: 'branches', label: 'Branches', perm: 'branches.view' },
+        ]
+    },
+    {
+        key: 'sub_finance', label: '💰 Finance & Money', items: [
+            { key: 'money', label: 'Money accounts & recent movements', perm: 'money.view' },
+            { key: 'wallets', label: 'Advance wallets (More pages)', perm: 'wallets.view' },
+            { key: 'payment', label: 'Record a payment', perm: 'payments.create' },
+            { key: 'expenses', label: 'Expenses (view + record)', perm: 'expenses.view' },
+            { key: 'salaries', label: 'Salary payments (More pages)', perm: 'salaries.view' },
+            { key: 'loans', label: 'Staff loans outstanding', perm: 'salaries.view' },
+            { key: 'reports', label: 'Reports (sales vs expenses)', perm: 'reports.view' },
+        ]
+    },
+    {
+        key: 'sub_people', label: '👥 People', items: [
+            { key: 'customers', label: 'Customers & debts', perm: 'customers.view' },
+            { key: 'riders', label: 'Riders & balances (More pages)', perm: 'riders.view' },
+            { key: 'staff', label: 'Staff list (More pages)', perm: 'staff.view' },
+        ]
+    },
+    {
+        key: 'sub_alerts', label: '🔔 Alerts & Approvals', items: [
+            { key: 'alerts', label: 'Inventory alerts (More pages)', perm: 'inventory.view' },
+            { key: 'approvals', label: 'Pending approvals', perm: 'approvals.view' },
+        ]
+    },
+    { key: 'chat', label: '💬 Team Chat inbox', perm: 'chat.view' },
+    { key: 'ai', label: '🤖 Ask the assistant', perm: 'ai_assistant.view' },
+];
+
+// Build the top-level menu: keep a group only if the role can use ≥1 item in it
+async function buildMenu(role) {
+    const out = [];
+    for (const g of MENU_GROUPS) {
+        if (g.items) {
+            const items = [];
+            for (const it of g.items) {
+                if (await checkPermission(role, it.perm)) items.push(it);
+            }
+            if (items.length) out.push({ key: g.key, label: g.label, items });
+        } else if (await checkPermission(role, g.perm)) {
+            out.push({ key: g.key, label: g.label });
+        }
+    }
+    return out;
+}
+
+function menuText(user, options) {
+    let t = `*Purple Premium Bread* — Telegram\nHello ${esc(user.fullname)} (${esc(user.role)}). What would you like to do?\n`;
+    options.forEach((o, i) => { t += `\n${i + 1}. ${o.label}`; });
+    t += `\n\nReply with a number. Send *0* anytime to return to this menu, or *logout* to unlink this account.`;
+    return t;
+}
+
+function subMenuText(title, items) {
+    let t = `*${title}*\n`;
+    items.forEach((o, i) => { t += `\n${i + 1}. ${o.label}`; });
+    t += `\n\n0. Back to menu`;
+    return t;
+}
+
+// ---------------------------------------------------------------------------
+// Paged lists — every long list shows PAGE_SIZE rows and offers:
+//   8. ◀ Previous page      9. More ▶      0. Back
+// state: { flow:'page', kind, page, extra? }
+// ---------------------------------------------------------------------------
+const PAGE_SIZE = 10;
+
+async function pageFlow(chatId, user, session, state, text) {
+    let page = state.page || 0;
+    if (text === '9') page += 1;
+    else if (text === '8') page = Math.max(0, page - 1);
+    else return sendTelegramText(chatId, 'Reply *9* for more, *8* for previous page, or *0* for the menu.');
+    await renderPage(chatId, session, state.kind, page, state.extra || {});
+}
+
+async function startPage(chatId, session, kind, extra = {}) {
+    await renderPage(chatId, session, kind, 0, extra);
+}
+
+async function renderPage(chatId, session, kind, page, extra) {
+    const offset = page * PAGE_SIZE;
+    const L = PAGE_SIZE + 1; // fetch one extra row to know if "More" exists
+    let t = '', hasMore = false;
+    const fmtDate = (d) => d ? new Date(d).toLocaleDateString('en-NG') : '';
+
+    if (kind === 'sales_history') {
+        const r = await db.query(
+            `SELECT st.id, st.total_amount, st.status, st.sale_date,
+                    COALESCE(c.fullname, r2.fullname, 'Walk-in') AS party
+             FROM sales_transactions st
+             LEFT JOIN customers c ON st.customer_id = c.id
+             LEFT JOIN riders r2 ON st.rider_id = r2.id
+             ORDER BY st.id DESC LIMIT $1 OFFSET $2`, [L, offset]);
+        hasMore = r.rows.length > PAGE_SIZE;
+        t = `*Sales history* — page ${page + 1}\n`;
+        r.rows.slice(0, PAGE_SIZE).forEach(x => {
+            t += `\n#${x.id} — ${esc(x.party)} — ${money(x.total_amount)} (${esc(x.status || 'n/a')}) ${fmtDate(x.sale_date)}`;
+        });
+        if (!r.rows.length) t += '\nNo sales on this page.';
+    }
+    else if (kind === 'returns') {
+        const r = await db.query(
+            `SELECT sr.id, sr.sale_id, sr.total_amount, sr.refund_method, sr.return_date,
+                    COALESCE(c.fullname, r2.fullname, 'Walk-in') AS party
+             FROM sales_returns sr
+             LEFT JOIN customers c ON sr.customer_id = c.id
+             LEFT JOIN riders r2 ON sr.rider_id = r2.id
+             ORDER BY sr.id DESC LIMIT $1 OFFSET $2`, [L, offset]);
+        hasMore = r.rows.length > PAGE_SIZE;
+        t = `*Sales returns* — page ${page + 1}\n`;
+        r.rows.slice(0, PAGE_SIZE).forEach(x => {
+            t += `\n#${x.id} — sale #${x.sale_id} — ${esc(x.party)} — ${money(x.total_amount)} (${esc(x.refund_method || 'n/a')}) ${fmtDate(x.return_date)}`;
+        });
+        if (!r.rows.length) t += '\nNo returns recorded.';
+    }
+    else if (kind === 'exchanges') {
+        const r = await db.query(
+            `SELECT er.id, er.original_sale_id, er.status, er.reason, er.created_at,
+                    c.fullname AS customer
+             FROM exchange_requests er
+             LEFT JOIN customers c ON er.customer_id = c.id
+             ORDER BY er.id DESC LIMIT $1 OFFSET $2`, [L, offset]);
+        hasMore = r.rows.length > PAGE_SIZE;
+        t = `*Exchanges* — page ${page + 1}\n`;
+        r.rows.slice(0, PAGE_SIZE).forEach(x => {
+            t += `\n#${x.id} — sale #${x.original_sale_id} — ${esc(x.customer || 'n/a')} — ${esc(x.status || 'n/a')} ${fmtDate(x.created_at)}`;
+        });
+        if (!r.rows.length) t += '\nNo exchange requests.';
+    }
+    else if (kind === 'production_log') {
+        const r = await db.query(
+            `SELECT pl.id, pl.quantity_produced, pl.waste_quantity, pl.production_date, pl.shift,
+                    p.name AS product
+             FROM production_logs pl
+             LEFT JOIN products p ON pl.product_id = p.id
+             ORDER BY pl.id DESC LIMIT $1 OFFSET $2`, [L, offset]);
+        hasMore = r.rows.length > PAGE_SIZE;
+        t = `*Production history* — page ${page + 1}\n`;
+        r.rows.slice(0, PAGE_SIZE).forEach(x => {
+            t += `\n${esc(x.product || 'Product')} — ${x.quantity_produced} produced${x.waste_quantity ? `, ${x.waste_quantity} waste` : ''} (${esc(x.shift || 'n/a')}) ${fmtDate(x.production_date)}`;
+        });
+        if (!r.rows.length) t += '\nNo production logged yet.';
+    }
+    else if (kind === 'stock') {
+        const r = await db.query(
+            `SELECT p.name, i.quantity, p.min_stock_level
+             FROM inventory i JOIN products p ON p.id = i.product_id
+             ORDER BY p.name LIMIT $1 OFFSET $2`, [L, offset]);
+        hasMore = r.rows.length > PAGE_SIZE;
+        t = `*Product stock levels* — page ${page + 1}\n`;
+        r.rows.slice(0, PAGE_SIZE).forEach(x => {
+            const low = Number(x.quantity) <= Number(x.min_stock_level || 0) ? ' ⚠️ LOW' : '';
+            t += `\n${esc(x.name)} — ${x.quantity} in stock${low}`;
+        });
+        if (!r.rows.length) t += '\nNo stock records yet.';
+    }
+    else if (kind === 'raw_materials') {
+        const r = await db.query(
+            `SELECT name, unit, current_stock, min_stock_level
+             FROM raw_materials ORDER BY name LIMIT $1 OFFSET $2`, [L, offset]);
+        hasMore = r.rows.length > PAGE_SIZE;
+        t = `*Raw materials* — page ${page + 1}\n`;
+        r.rows.slice(0, PAGE_SIZE).forEach(x => {
+            const low = Number(x.current_stock) <= Number(x.min_stock_level || 0) ? ' ⚠️ LOW' : '';
+            t += `\n${esc(x.name)} — ${Number(x.current_stock)} ${esc(x.unit || '')}${low}`;
+        });
+        if (!r.rows.length) t += '\nNo raw materials recorded.';
+    }
+    else if (kind === 'waste') {
+        const r = await db.query(
+            `SELECT w.quantity, w.reason, w.date_recorded, p.name AS product
+             FROM waste_stock w LEFT JOIN products p ON w.product_id = p.id
+             ORDER BY w.id DESC LIMIT $1 OFFSET $2`, [L, offset]);
+        hasMore = r.rows.length > PAGE_SIZE;
+        t = `*Waste stock* — page ${page + 1}\n`;
+        r.rows.slice(0, PAGE_SIZE).forEach(x => {
+            t += `\n${esc(x.product || 'Product')} — ${x.quantity} (${esc(x.reason || 'n/a')}) ${fmtDate(x.date_recorded)}`;
+        });
+        if (!r.rows.length) t += '\nNo waste recorded.';
+    }
+    else if (kind === 'wallets') {
+        const r = await db.query(
+            `SELECT fullname, advance_balance, 'Customer' AS kind FROM customers WHERE COALESCE(advance_balance,0) > 0
+             UNION ALL
+             SELECT fullname, advance_balance, 'Rider' FROM riders WHERE COALESCE(advance_balance,0) > 0
+             ORDER BY advance_balance DESC LIMIT $1 OFFSET $2`, [L, offset]);
+        hasMore = r.rows.length > PAGE_SIZE;
+        t = `*Advance wallets* — page ${page + 1}\n`;
+        r.rows.slice(0, PAGE_SIZE).forEach(x => {
+            t += `\n${esc(x.fullname)} (${x.kind}) — ${money(x.advance_balance)}`;
+        });
+        if (!r.rows.length) t += '\nNo wallet balances right now.';
+    }
+    else if (kind === 'salaries') {
+        const r = await db.query(
+            `SELECT sp.id, sp.salary_period, sp.net_amount, sp.status, sp.payment_date,
+                    COALESCE(sm.fullname, u.fullname, 'Staff') AS name
+             FROM salary_payments sp
+             LEFT JOIN staff_members sm ON sp.staff_member_id = sm.id
+             LEFT JOIN users u ON sp.user_id = u.id
+             ORDER BY sp.id DESC LIMIT $1 OFFSET $2`, [L, offset]);
+        hasMore = r.rows.length > PAGE_SIZE;
+        t = `*Salary payments* — page ${page + 1}\n`;
+        r.rows.slice(0, PAGE_SIZE).forEach(x => {
+            t += `\n${esc(x.name)} — ${money(x.net_amount)} (${esc(x.status || 'n/a')}) period ${fmtDate(x.salary_period)}`;
+        });
+        if (!r.rows.length) t += '\nNo salary payments recorded.';
+    }
+    else if (kind === 'riders') {
+        const r = await db.query(
+            `SELECT fullname, phone_number, current_balance
+             FROM riders ORDER BY current_balance DESC LIMIT $1 OFFSET $2`, [L, offset]);
+        hasMore = r.rows.length > PAGE_SIZE;
+        t = `*Riders* — page ${page + 1}\n`;
+        r.rows.slice(0, PAGE_SIZE).forEach(x => {
+            t += `\n${esc(x.fullname)} — holding ${money(x.current_balance)}${x.phone_number ? ' — ' + esc(x.phone_number) : ''}`;
+        });
+        if (!r.rows.length) t += '\nNo riders found.';
+    }
+    else if (kind === 'staff') {
+        const r = await db.query(
+            `SELECT fullname, position, department, is_active
+             FROM staff_members ORDER BY fullname LIMIT $1 OFFSET $2`, [L, offset]);
+        hasMore = r.rows.length > PAGE_SIZE;
+        t = `*Staff* — page ${page + 1}\n`;
+        r.rows.slice(0, PAGE_SIZE).forEach(x => {
+            t += `\n${esc(x.fullname)} — ${esc(x.position || 'n/a')}${x.department ? ' (' + esc(x.department) + ')' : ''}${x.is_active === false ? ' [inactive]' : ''}`;
+        });
+        if (!r.rows.length) t += '\nNo staff records.';
+    }
+    else if (kind === 'alerts') {
+        const r = await db.query(
+            `SELECT alert_type, entity_name, message, status, created_at
+             FROM inventory_alerts ORDER BY id DESC LIMIT $1 OFFSET $2`, [L, offset]);
+        hasMore = r.rows.length > PAGE_SIZE;
+        t = `*Inventory alerts* — page ${page + 1}\n`;
+        r.rows.slice(0, PAGE_SIZE).forEach(x => {
+            t += `\n[${esc(x.status || 'n/a')}] ${esc(x.entity_name || '')}: ${esc((x.message || '').slice(0, 90))} ${fmtDate(x.created_at)}`;
+        });
+        if (!r.rows.length) t += '\nNo alerts. 🎉';
+    }
+    else if (kind === 'debtors') {
+        const r = await db.query(
+            `SELECT fullname, balance FROM customers WHERE balance > 0
+             ORDER BY balance DESC LIMIT $1 OFFSET $2`, [L, offset]);
+        hasMore = r.rows.length > PAGE_SIZE;
+        t = `*Customer debts* — page ${page + 1}\n`;
+        r.rows.slice(0, PAGE_SIZE).forEach((x, i) => {
+            t += `\n${offset + i + 1}. ${esc(x.fullname)} — ${money(x.balance)}`;
+        });
+        if (!r.rows.length) t += page === 0 ? '\nNo customer owes anything right now. 🎉' : '\nNo more debtors.';
+    }
+    else if (kind === 'money_tx') {
+        const r = await db.query(
+            `SELECT direction, amount, category, description, transaction_date
+             FROM money_transactions ORDER BY id DESC LIMIT $1 OFFSET $2`, [L, offset]);
+        hasMore = r.rows.length > PAGE_SIZE;
+        t = `*Money movements* — page ${page + 1}\n`;
+        r.rows.slice(0, PAGE_SIZE).forEach(x => {
+            const sign = x.direction === 'IN' ? '➕' : '➖';
+            t += `\n${sign} ${money(x.amount)} — ${esc(x.category || 'n/a')} — ${esc((x.description || '').slice(0, 60))} ${fmtDate(x.transaction_date)}`;
+        });
+        if (!r.rows.length) t += '\nNo money movements recorded.';
+    }
+    else {
+        await saveState(session.id, {});
+        return sendTelegramText(chatId, 'Unknown list. Send *0* for the menu.');
+    }
+
+    t += `\n`;
+    if (page > 0) t += `\n8. ◀ Previous page`;
+    if (hasMore) t += `\n9. More ▶`;
+    t += `\n0. Back to menu`;
+    await saveState(session.id, { flow: 'page', kind, page, extra });
+    await sendTelegramText(chatId, t);
+}
+
+// ---------------------------------------------------------------------------
 // Flow dispatcher
 // ---------------------------------------------------------------------------
 async function dispatchFlow(chatId, user, session, state, text) {
@@ -319,14 +596,37 @@ async function dispatchFlow(chatId, user, session, state, text) {
             return;
         }
         const choice = options[idx - 1];
+        if (choice.items) {
+            // Open the sub-menu
+            await saveState(session.id, { flow: 'sub', group: choice.label, options: choice.items });
+            await sendTelegramText(chatId, subMenuText(choice.label.replace(/^[^\s]+\s/, ''), choice.items));
+            return;
+        }
         await startFlow(chatId, user, session, choice.key);
         return;
     }
 
+    if (flow === 'sub') {
+        const idx = parseInt(text, 10);
+        const options = state.options || [];
+        if (isNaN(idx) || idx < 1 || idx > options.length) {
+            await sendTelegramText(chatId, `Reply 1-${options.length}, or *0* for the main menu.`);
+            return;
+        }
+        await startFlow(chatId, user, session, options[idx - 1].key);
+        return;
+    }
+
     switch (flow) {
+        case 'page': return pageFlow(chatId, user, session, state, text);
+        case 'money_menu': {
+            if (text === '1') return startPage(chatId, session, 'money_tx');
+            return sendTelegramText(chatId, 'Reply 1 for recent money movements, or 0 for the menu.');
+        }
         case 'sales': return salesFlow(chatId, user, session, state, text);
-        case 'customers': return customersFlow(chatId, user, session, state, text);
+        case 'production': return productionFlow(chatId, user, session, state, text);
         case 'products': return productsFlow(chatId, user, session, state, text);
+        case 'customers': return customersFlow(chatId, user, session, state, text);
         case 'payment': return paymentFlow(chatId, user, session, state, text);
         case 'expenses': return expensesFlow(chatId, user, session, state, text);
         case 'reports': return reportsFlow(chatId, user, session, state, text);
@@ -342,21 +642,97 @@ async function dispatchFlow(chatId, user, session, state, text) {
 async function startFlow(chatId, user, session, key) {
     switch (key) {
         case 'dashboard': return dashboardFlow(chatId, user, session);
-        case 'sales': {
+
+        // ---- Sales ----
+        case 'sales_summary': {
             await saveState(session.id, { flow: 'sales', step: 'menu' });
             return sendTelegramText(chatId,
-                `*Sales*\n1. Today\n2. This week\n3. This month\n4. Find a sale by number\n\n0. Back to menu`);
+                `*Sales summary*\n1. Today\n2. This week\n3. This month\n\n0. Back to menu`);
         }
-        case 'customers': {
-            await saveState(session.id, { flow: 'customers', step: 'menu' });
+        case 'sales_history': return startPage(chatId, session, 'sales_history');
+        case 'sale_find': {
+            await saveState(session.id, { flow: 'sales', step: 'find' });
+            return sendTelegramText(chatId, 'Type the sale number (e.g. 125):\n\n0. Back to menu');
+        }
+        case 'returns': return startPage(chatId, session, 'returns');
+        case 'exchanges': return startPage(chatId, session, 'exchanges');
+
+        // ---- Production & products ----
+        case 'production': {
+            await saveState(session.id, { flow: 'production', step: 'menu' });
             return sendTelegramText(chatId,
-                `*Customers & debts*\n1. Top debtors\n2. Search a customer\n3. Customer count\n\n0. Back to menu`);
+                `*Production summary*\n1. Today\n2. This week\n3. This month\n\n0. Back to menu`);
         }
+        case 'production_log': return startPage(chatId, session, 'production_log');
         case 'products': {
-            await saveState(session.id, { flow: 'products', step: 'search' });
+            await saveState(session.id, { flow: 'products', step: 'menu' });
             return sendTelegramText(chatId,
-                `*Products*\nType part of a product name to see its price and category.\n\n0. Back to menu`);
+                `*Products & prices*\n1. Search a product\n2. All products (prices)\n3. Low-stock products\n\n0. Back to menu`);
         }
+        case 'stock': return startPage(chatId, session, 'stock');
+        case 'recipes': {
+            const r = await db.query(
+                `SELECT p.name AS product, rm.name AS material, rm.unit, r.quantity_required
+                 FROM recipes r
+                 LEFT JOIN products p ON p.id = r.product_id
+                 LEFT JOIN raw_materials rm ON rm.id = r.raw_material_id
+                 ORDER BY p.name, rm.name LIMIT 60`);
+            let t = `*Recipes*\n`;
+            if (!r.rows.length) t += 'No recipes defined yet.';
+            let cur = null;
+            for (const x of r.rows) {
+                if (x.product !== cur) { cur = x.product; t += `\n*${esc(cur || 'Product')}*:`; }
+                t += `\n  - ${esc(x.material || '?')} ${Number(x.quantity_required)} ${esc(x.unit || '')}`;
+            }
+            t += `\n\n0. Back to menu`;
+            await saveState(session.id, { flow: 'menu-done' });
+            return sendTelegramText(chatId, t);
+        }
+
+        // ---- Raw materials & inventory ----
+        case 'raw_materials': return startPage(chatId, session, 'raw_materials');
+        case 'materials_low': {
+            const r = await db.query(
+                `SELECT name, unit, current_stock, min_stock_level FROM raw_materials
+                 WHERE COALESCE(current_stock,0) <= COALESCE(min_stock_level,0)
+                 ORDER BY current_stock ASC LIMIT 25`);
+            let t = `*Low-stock raw materials*\n`;
+            if (!r.rows.length) t += 'Nothing is below its minimum level. 🎉';
+            r.rows.forEach(x => { t += `\n⚠️ ${esc(x.name)} — ${Number(x.current_stock)} ${esc(x.unit || '')} (min ${Number(x.min_stock_level)})`; });
+            t += `\n\n0. Back to menu`;
+            await saveState(session.id, { flow: 'menu-done' });
+            return sendTelegramText(chatId, t);
+        }
+        case 'waste': return startPage(chatId, session, 'waste');
+        case 'branches': {
+            const r = await db.query(`SELECT name, contact_person, phone, address FROM branches ORDER BY name LIMIT 25`);
+            let t = `*Branches*\n`;
+            if (!r.rows.length) t += 'No branches recorded.';
+            r.rows.forEach(x => {
+                t += `\n*${esc(x.name)}*${x.contact_person ? ' — ' + esc(x.contact_person) : ''}${x.phone ? ' (' + esc(x.phone) + ')' : ''}`;
+            });
+            t += `\n\n0. Back to menu`;
+            await saveState(session.id, { flow: 'menu-done' });
+            return sendTelegramText(chatId, t);
+        }
+
+        // ---- Finance ----
+        case 'money': {
+            const acc = await db.query(
+                `SELECT name, account_type, current_balance FROM money_accounts WHERE is_active = true ORDER BY name LIMIT 20`);
+            let t = `*Money accounts*\n`;
+            if (!acc.rows.length) t += 'No money accounts set up yet.';
+            let total = 0;
+            acc.rows.forEach(x => {
+                total += Number(x.current_balance || 0);
+                t += `\n${esc(x.name)} (${esc(x.account_type || 'n/a')}) — ${money(x.current_balance)}`;
+            });
+            if (acc.rows.length) t += `\n\nTotal across accounts: ${money(total)}`;
+            t += `\n\n1. See recent money movements\n\n0. Back to menu`;
+            await saveState(session.id, { flow: 'money_menu' });
+            return sendTelegramText(chatId, t);
+        }
+        case 'wallets': return startPage(chatId, session, 'wallets');
         case 'payment': {
             await saveState(session.id, { flow: 'payment', step: 'party', data: {} });
             return sendTelegramText(chatId,
@@ -370,14 +746,25 @@ async function startFlow(chatId, user, session, key) {
             t += `\n\n0. Back to menu`;
             return sendTelegramText(chatId, t);
         }
-        case 'riders': {
+        case 'salaries': return startPage(chatId, session, 'salaries');
+        case 'loans': {
             const r = await db.query(
-                `SELECT fullname, phone_number, current_balance FROM riders ORDER BY current_balance DESC LIMIT 15`);
-            let t = `*Riders*\n`;
-            if (!r.rows.length) t += 'No riders found.';
-            r.rows.forEach((x, i) => {
-                t += `\n${i + 1}. ${esc(x.fullname)} — balance ${money(x.current_balance)}`;
+                `SELECT COALESCE(sm.fullname, u.fullname, 'Staff') AS name,
+                        l.amount, COALESCE(l.remaining_balance, l.amount) AS remaining,
+                        l.monthly_deduction, l.status, l.is_paid
+                 FROM staff_loans l
+                 LEFT JOIN staff_members sm ON l.staff_member_id = sm.id
+                 LEFT JOIN users u ON l.user_id = u.id
+                 WHERE l.is_paid = false OR COALESCE(l.remaining_balance, 1) > 0
+                 ORDER BY remaining DESC LIMIT 25`);
+            let t = `*Staff loans outstanding*\n`;
+            if (!r.rows.length) t += 'No outstanding loans. 🎉';
+            let total = 0;
+            r.rows.forEach(x => {
+                total += Number(x.remaining || 0);
+                t += `\n${esc(x.name)} — owes ${money(x.remaining)} of ${money(x.amount)}${x.monthly_deduction ? ` (${money(x.monthly_deduction)}/month)` : ''}`;
             });
+            if (r.rows.length) t += `\n\nTotal outstanding: ${money(total)}`;
             t += `\n\n0. Back to menu`;
             await saveState(session.id, { flow: 'menu-done' });
             return sendTelegramText(chatId, t);
@@ -387,6 +774,35 @@ async function startFlow(chatId, user, session, key) {
             return sendTelegramText(chatId,
                 `*Reports*\n1. Today\n2. This week\n3. This month\n\n0. Back to menu`);
         }
+
+        // ---- People ----
+        case 'customers': {
+            await saveState(session.id, { flow: 'customers', step: 'menu' });
+            return sendTelegramText(chatId,
+                `*Customers & debts*\n1. Customer debts (all pages)\n2. Search a customer\n3. Customer count\n\n0. Back to menu`);
+        }
+        case 'riders': return startPage(chatId, session, 'riders');
+        case 'staff': return startPage(chatId, session, 'staff');
+
+        // ---- Alerts & approvals ----
+        case 'alerts': return startPage(chatId, session, 'alerts');
+        case 'approvals': {
+            const r = await db.query(
+                `SELECT a.id, a.request_type, a.title, a.amount, a.created_at, u.fullname AS requester
+                 FROM approval_requests a LEFT JOIN users u ON a.requested_by = u.id
+                 WHERE LOWER(a.status) = 'pending'
+                 ORDER BY a.id DESC LIMIT 20`);
+            let t = `*Pending approvals*\n`;
+            if (!r.rows.length) t += 'Nothing is waiting for approval. 🎉';
+            r.rows.forEach(x => {
+                t += `\n#${x.id} — ${esc(x.title || x.request_type)}${x.amount ? ' — ' + money(x.amount) : ''} (by ${esc(x.requester || 'n/a')})`;
+            });
+            t += `\n\nApproving / rejecting is done in the app → Approvals.\n\n0. Back to menu`;
+            await saveState(session.id, { flow: 'menu-done' });
+            return sendTelegramText(chatId, t);
+        }
+
+        // ---- Communication ----
         case 'chat': return chatInboxFlow(chatId, user, session);
         case 'ai': {
             await saveState(session.id, { flow: 'ai' });
@@ -425,12 +841,8 @@ async function dashboardFlow(chatId, user, session) {
 
 async function salesFlow(chatId, user, session, state, text) {
     if (state.step === 'menu') {
-        if (text === '4') {
-            await saveState(session.id, { flow: 'sales', step: 'find' });
-            return sendTelegramText(chatId, 'Type the sale number (e.g. 125):\n\n0. Back to menu');
-        }
         const period = { '1': 'today', '2': 'week', '3': 'month' }[text];
-        if (!period) return sendTelegramText(chatId, 'Reply 1, 2, 3 or 4 — or 0 for the menu.');
+        if (!period) return sendTelegramText(chatId, 'Reply 1, 2 or 3 — or 0 for the menu.');
         const s = await salesSummary(period);
         const rows = await db.query(
             `SELECT st.id, st.total_amount, st.status, COALESCE(c.fullname, r2.fullname, 'Walk-in') AS party
@@ -442,7 +854,7 @@ async function salesFlow(chatId, user, session, state, text) {
         let t = `*Sales — ${PERIOD_LABEL[period]}*\nTotal: ${money(s.total)} across ${s.n} sale(s)`;
         t += `\nUnpaid balance on them: ${money(s.credit)}\n`;
         rows.rows.forEach(r => { t += `\n#${r.id} — ${esc(r.party)} — ${money(r.total_amount)} (${esc(r.status || 'n/a')})`; });
-        t += `\n\n0. Back to menu`;
+        t += `\n\nFor the full list use Sales → Sales history.\n\n0. Back to menu`;
         await saveState(session.id, { flow: 'menu-done' });
         return sendTelegramText(chatId, t);
     }
@@ -461,7 +873,14 @@ async function salesFlow(chatId, user, session, state, text) {
             return sendTelegramText(chatId, `No sale found with number ${id}.\n\n0. Back to menu`);
         }
         const s = r.rows[0];
+        const items = await db.query(
+            `SELECT si.quantity, si.price_at_sale, p.name FROM sales_items si
+             LEFT JOIN products p ON si.product_id = p.id WHERE si.sale_id = $1`, [id]);
         let t = `*Sale #${s.id}*\n${esc(s.party)}\nDate: ${new Date(s.sale_date).toLocaleDateString('en-NG')}`;
+        if (items.rows.length) {
+            t += `\nItems:`;
+            items.rows.forEach(x => { t += `\n  - ${esc(x.name || 'Product')} x${x.quantity} @ ${money(x.price_at_sale)}`; });
+        }
         t += `\nTotal: ${money(s.total_amount)}\nPaid: ${money(s.amount_paid)}\nBalance: ${money(s.balance_due)}`;
         t += `\nMethod: ${esc(s.payment_method || 'n/a')} — Status: ${esc(s.status || 'n/a')}`;
         t += `\n\n0. Back to menu`;
@@ -470,18 +889,30 @@ async function salesFlow(chatId, user, session, state, text) {
     }
 }
 
+async function productionFlow(chatId, user, session, state, text) {
+    const period = { '1': 'today', '2': 'week', '3': 'month' }[text];
+    if (!period) return sendTelegramText(chatId, 'Reply 1, 2 or 3 — or 0 for the menu.');
+    const sum = await db.query(
+        `SELECT COALESCE(SUM(quantity_produced),0) AS produced, COALESCE(SUM(waste_quantity),0) AS waste, COUNT(*) AS batches
+         FROM production_logs WHERE ${periodWhere('production_date', period)}`);
+    const top = await db.query(
+        `SELECT p.name, SUM(pl.quantity_produced) AS qty
+         FROM production_logs pl LEFT JOIN products p ON pl.product_id = p.id
+         WHERE ${periodWhere('pl.production_date', period)}
+         GROUP BY p.name ORDER BY qty DESC LIMIT 10`);
+    const s = sum.rows[0];
+    let t = `*Production — ${PERIOD_LABEL[period]}*\n`;
+    t += `Produced: ${s.produced} units across ${s.batches} batch(es)`;
+    t += `\nWaste: ${s.waste} units\n`;
+    top.rows.forEach(x => { t += `\n- ${esc(x.name || 'Product')}: ${x.qty}`; });
+    t += `\n\nFor the full log use Production → Production history.\n\n0. Back to menu`;
+    await saveState(session.id, { flow: 'menu-done' });
+    await sendTelegramText(chatId, t);
+}
+
 async function customersFlow(chatId, user, session, state, text) {
     if (state.step === 'menu') {
-        if (text === '1') {
-            const r = await db.query(
-                `SELECT fullname, balance FROM customers WHERE balance > 0 ORDER BY balance DESC LIMIT 10`);
-            let t = `*Top debtors*\n`;
-            if (!r.rows.length) t += 'No customer owes anything right now. 🎉';
-            r.rows.forEach((c, i) => { t += `\n${i + 1}. ${esc(c.fullname)} — ${money(c.balance)}`; });
-            t += `\n\n0. Back to menu`;
-            await saveState(session.id, { flow: 'menu-done' });
-            return sendTelegramText(chatId, t);
-        }
+        if (text === '1') return startPage(chatId, session, 'debtors');
         if (text === '2') {
             await saveState(session.id, { flow: 'customers', step: 'search' });
             return sendTelegramText(chatId, 'Type part of the customer name:\n\n0. Back to menu');
@@ -515,21 +946,51 @@ async function customersFlow(chatId, user, session, state, text) {
 }
 
 async function productsFlow(chatId, user, session, state, text) {
-    const r = await db.query(
-        `SELECT name, price, category FROM products WHERE name ILIKE $1 ORDER BY name LIMIT 10`,
-        [`%${text}%`]);
-    let t;
-    if (!r.rows.length) {
-        t = `No product matching "${esc(text)}".`;
-    } else {
-        t = `*Products matching "${esc(text)}"*\n`;
-        r.rows.forEach(p => { t += `\n- ${esc(p.name)} — ${money(p.price)}${p.category ? ' (' + esc(p.category) + ')' : ''}`; });
+    if (state.step === 'menu') {
+        if (text === '1') {
+            await saveState(session.id, { flow: 'products', step: 'search' });
+            return sendTelegramText(chatId, 'Type part of a product name:\n\n0. Back to menu');
+        }
+        if (text === '2') {
+            const r = await db.query(`SELECT name, price, category FROM products ORDER BY name LIMIT 40`);
+            let t = `*Products & prices*\n`;
+            if (!r.rows.length) t += 'No products yet.';
+            r.rows.forEach(p => { t += `\n- ${esc(p.name)} — ${money(p.price)}${p.category ? ' (' + esc(p.category) + ')' : ''}`; });
+            t += `\n\n0. Back to menu`;
+            await saveState(session.id, { flow: 'menu-done' });
+            return sendTelegramText(chatId, t);
+        }
+        if (text === '3') {
+            const r = await db.query(
+                `SELECT p.name, i.quantity, p.min_stock_level
+                 FROM inventory i JOIN products p ON p.id = i.product_id
+                 WHERE COALESCE(i.quantity,0) <= COALESCE(p.min_stock_level,0)
+                 ORDER BY i.quantity ASC LIMIT 25`);
+            let t = `*Low-stock products*\n`;
+            if (!r.rows.length) t += 'No product is below its minimum level. 🎉';
+            r.rows.forEach(x => { t += `\n⚠️ ${esc(x.name)} — ${x.quantity} left (min ${Number(x.min_stock_level)})`; });
+            t += `\n\n0. Back to menu`;
+            await saveState(session.id, { flow: 'menu-done' });
+            return sendTelegramText(chatId, t);
+        }
+        return sendTelegramText(chatId, 'Reply 1, 2 or 3 — or 0 for the menu.');
     }
-    t += `\n\nType another name to search again, or 0 for the menu.`;
-    await saveState(session.id, { flow: 'products', step: 'search' });
-    await sendTelegramText(chatId, t);
+    if (state.step === 'search') {
+        const r = await db.query(
+            `SELECT name, price, category FROM products WHERE name ILIKE $1 ORDER BY name LIMIT 10`,
+            [`%${text}%`]);
+        let t;
+        if (!r.rows.length) {
+            t = `No product matching "${esc(text)}".`;
+        } else {
+            t = `*Products matching "${esc(text)}"*\n`;
+            r.rows.forEach(p => { t += `\n- ${esc(p.name)} — ${money(p.price)}${p.category ? ' (' + esc(p.category) + ')' : ''}`; });
+        }
+        t += `\n\nType another name to search again, or 0 for the menu.`;
+        await saveState(session.id, { flow: 'products', step: 'search' });
+        await sendTelegramText(chatId, t);
+    }
 }
-
 async function chatInboxFlow(chatId, user, session) {
     const unread = await db.query(
         `SELECT COUNT(*) AS n FROM chat_messages m
@@ -559,23 +1020,6 @@ async function chatInboxFlow(chatId, user, session) {
     await saveState(session.id, { flow: 'menu-done' });
     await sendTelegramText(chatId, t);
 }
-
-async function reportsFlow(chatId, user, session, state, text) {
-    const period = { '1': 'today', '2': 'week', '3': 'month' }[text];
-    if (!period) return sendTelegramText(chatId, 'Reply 1, 2 or 3 — or 0 for the menu.');
-    const [s, p, e] = await Promise.all([salesSummary(period), paymentsSummary(period), expensesSummary(period)]);
-    const net = parseFloat(p.total) - parseFloat(e.total);
-    let t = `*Report — ${PERIOD_LABEL[period]}*\n`;
-    t += `\nSales made: ${money(s.total)} (${s.n})`;
-    t += `\nPayments received: ${money(p.total)} (${p.n})`;
-    t += `\nExpenses: ${money(e.total)} (${e.n})`;
-    t += `\nNet cash movement: ${money(net)}`;
-    t += `\nCredit still open on these sales: ${money(s.credit)}`;
-    t += `\n\nFull breakdowns are on the Reports page in the app.\n\n0. Back to menu`;
-    await saveState(session.id, { flow: 'menu-done' });
-    await sendTelegramText(chatId, t);
-}
-
 async function aiFlow(chatId, user, session, state, text) {
     const q = text.toLowerCase();
     let answer = null;
@@ -607,7 +1051,6 @@ async function aiFlow(chatId, user, session, state, text) {
     }
     await sendTelegramText(chatId, answer + `\n\nAsk another, or 0 for the menu.`);
 }
-
 // ---------------------------------------------------------------------------
 // Payment flow — same oldest-first allocation logic as the app
 // ---------------------------------------------------------------------------
@@ -899,6 +1342,21 @@ async function expensesFlow(chatId, user, session, state, text) {
             return sendTelegramText(chatId, 'Failed to save the expense — nothing was recorded. Please use the app.\n\n0. Back to menu');
         }
     }
+}
+async function reportsFlow(chatId, user, session, state, text) {
+    const period = { '1': 'today', '2': 'week', '3': 'month' }[text];
+    if (!period) return sendTelegramText(chatId, 'Reply 1, 2 or 3 — or 0 for the menu.');
+    const [s, p, e] = await Promise.all([salesSummary(period), paymentsSummary(period), expensesSummary(period)]);
+    const net = parseFloat(p.total) - parseFloat(e.total);
+    let t = `*Report — ${PERIOD_LABEL[period]}*\n`;
+    t += `\nSales made: ${money(s.total)} (${s.n})`;
+    t += `\nPayments received: ${money(p.total)} (${p.n})`;
+    t += `\nExpenses: ${money(e.total)} (${e.n})`;
+    t += `\nNet cash movement: ${money(net)}`;
+    t += `\nCredit still open on these sales: ${money(s.credit)}`;
+    t += `\n\nFull breakdowns are on the Reports page in the app.\n\n0. Back to menu`;
+    await saveState(session.id, { flow: 'menu-done' });
+    await sendTelegramText(chatId, t);
 }
 
 // ---------------------------------------------------------------------------
