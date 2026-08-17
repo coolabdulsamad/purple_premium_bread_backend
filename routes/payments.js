@@ -509,7 +509,17 @@ router.post('/rider', async (req, res) => {
             VALUES ($1, $2, $3, $4, $5, $6, true)
             RETURNING id;
         `;
-        const paymentResult = await client.query(paymentQuery, [transaction_id, rider_id, sale.customer_id, paymentAmount, payment_date, payment_method]);
+        // Resolve a non-null customer_id: prefer the sale's customer, then the rider's linked customer account.
+        let payCustomerId = sale.customer_id || null;
+        if (!payCustomerId) {
+            const rc = await client.query('SELECT customer_id FROM riders WHERE id = $1', [rider_id]);
+            payCustomerId = rc.rows.length ? (rc.rows[0].customer_id || null) : null;
+        }
+        if (!payCustomerId) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'This sale has no customer and the rider has no linked customer account. Link a customer to the rider first.' });
+        }
+        const paymentResult = await client.query(paymentQuery, [transaction_id, rider_id, payCustomerId, paymentAmount, payment_date, payment_method]);
         const newPaymentId = paymentResult.rows[0].id;
 
         const newBalanceDue = sale.balance_due - paymentAmount;
