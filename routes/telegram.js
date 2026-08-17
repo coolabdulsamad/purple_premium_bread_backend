@@ -1233,14 +1233,15 @@ async function allocatePayment(data, userId) {
     try {
         await client.query('BEGIN');
 
-        const ownerRes = await client.query(`SELECT id FROM ${ownerTable} WHERE id = $1 FOR UPDATE`, [ownerId]);
+        const ownerRes = await client.query(`SELECT id${isRider ? ', customer_id' : ''} FROM ${ownerTable} WHERE id = $1 FOR UPDATE`, [ownerId]);
         if (!ownerRes.rows.length) {
             await client.query('ROLLBACK');
             return 'That record no longer exists — payment NOT recorded.';
         }
+        const riderCustomerId = isRider ? (ownerRes.rows[0].customer_id || null) : null;
 
         const salesQuery = isRider
-            ? `SELECT id, balance_due, payment_method FROM sales_transactions
+            ? `SELECT id, balance_due, payment_method, customer_id FROM sales_transactions
                WHERE rider_id = $1 AND is_rider_sale = true AND balance_due > 0
                ORDER BY due_date ASC NULLS LAST, sale_date ASC, id ASC FOR UPDATE`
             : `SELECT id, balance_due FROM sales_transactions
@@ -1259,7 +1260,7 @@ async function allocatePayment(data, userId) {
             await client.query(
                 `INSERT INTO payments (transaction_id, customer_id, rider_id, amount, payment_date, payment_method, is_rider_payment, payment_reference, receipt_image_url)
                  VALUES ($1, $2, $3, $4, CURRENT_DATE, $5, $6, $7, $8) RETURNING id`,
-                [sale.id, isRider ? null : ownerId, isRider ? ownerId : null, pay, method, isRider,
+                [sale.id, isRider ? (sale.customer_id || riderCustomerId) : ownerId, isRider ? ownerId : null, pay, method, isRider,
                  data.reference || null, data.receiptUrl || null]
             );
             await client.query(
@@ -1769,14 +1770,23 @@ async function processTelegramSale(data, user) {
 
         // Rider remittance at sale time → payments + rider history (same as the app)
         if (data.rider && paid > 0) {
-            const p = await client.query(
-                `INSERT INTO payments (transaction_id, customer_id, rider_id, amount, payment_date, payment_method, is_rider_payment)
-                 VALUES ($1, $2, $3, $4, CURRENT_DATE, $5, true) RETURNING id`,
-                [saleId, data.customer ? data.customer.id : null, data.rider.id, paid, data.method]);
-            await client.query(
-                `INSERT INTO rider_payment_history (rider_id, payment_id, amount, payment_date, payment_method, notes, recorded_by)
-                 VALUES ($1, $2, $3, CURRENT_TIMESTAMP, $4, $5, $6)`,
-                [data.rider.id, p.rows[0].id, paid, data.method, `Payment for transaction #${saleId}`, user.id]);
+            // payments.customer_id is NOT NULL — fall back to the rider's linked
+            // customer account for street sales with no registered customer.
+            let payCustomerId = data.customer ? data.customer.id : null;
+            if (!payCustomerId) {
+                const rc = await client.query('SELECT customer_id FROM riders WHERE id = $1', [data.rider.id]);
+                payCustomerId = rc.rows.length ? (rc.rows[0].customer_id || null) : null;
+            }
+            if (payCustomerId) {
+                const p = await client.query(
+                    `INSERT INTO payments (transaction_id, customer_id, rider_id, amount, payment_date, payment_method, is_rider_payment)
+                     VALUES ($1, $2, $3, $4, CURRENT_DATE, $5, true) RETURNING id`,
+                    [saleId, payCustomerId, data.rider.id, paid, data.method]);
+                await client.query(
+                    `INSERT INTO rider_payment_history (rider_id, payment_id, amount, payment_date, payment_method, notes, recorded_by)
+                     VALUES ($1, $2, $3, CURRENT_TIMESTAMP, $4, $5, $6)`,
+                    [data.rider.id, p.rows[0].id, paid, data.method, `Payment for transaction #${saleId}`, user.id]);
+            }
         }
 
         await client.query('COMMIT');
