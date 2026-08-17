@@ -494,10 +494,18 @@ router.post('/process', async (req, res) => {
 
         // --- STEP 10: If this was a rider sale, log to rider_payment_history if payment was made ---
         if (isRiderSale && riderId && amountPaid > 0) {
+            // payments.customer_id is NOT NULL — fall back to the rider's linked
+            // customer account for street sales with no registered customer.
+            let payCustomerId = customerId || null;
+            if (!payCustomerId) {
+                const rc = await client.query('SELECT customer_id FROM riders WHERE id = $1', [riderId]);
+                payCustomerId = rc.rows.length ? (rc.rows[0].customer_id || null) : null;
+            }
+            if (payCustomerId) {
             // First, create a payment record
             const paymentQuery = `
         INSERT INTO payments (
-            transaction_id, customer_id, amount, payment_date, 
+            transaction_id, customer_id, amount, payment_date,
             payment_method, proof, rider_id, is_rider_payment
         )
         VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7)
@@ -506,7 +514,7 @@ router.post('/process', async (req, res) => {
 
             const paymentResult = await client.query(paymentQuery, [
                 saleId,
-                customerId || null,
+                payCustomerId,
                 amountPaid,
                 paymentMethod,
                 paymentImageUrl || null,
@@ -534,6 +542,7 @@ router.post('/process', async (req, res) => {
             ]);
 
             console.log(`Rider payment history updated for rider ${riderId} with payment ID ${paymentId}`);
+            }
         }
 
         await client.query('COMMIT');
