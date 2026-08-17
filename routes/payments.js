@@ -180,7 +180,7 @@ router.post('/allocate', authenticate, async (req, res) => {
         return res.status(400).json({ error: 'A positive payment amount is required.' });
     }
 
-    const isRider = !isNaN(riderId) && riderId;
+    const isRider = !isNaN(riderId) && !!riderId;
     const ownerType = isRider ? 'RIDER' : 'CUSTOMER';
     const ownerId = isRider ? riderId : customerId;
 
