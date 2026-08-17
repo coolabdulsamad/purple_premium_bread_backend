@@ -200,7 +200,7 @@ router.post('/allocate', authenticate, async (req, res) => {
 
         // 2. Fetch unpaid sales oldest-first
         const salesQuery = isRider
-            ? `SELECT id, balance_due, payment_method FROM sales_transactions
+            ? `SELECT id, balance_due, payment_method, customer_id FROM sales_transactions
                WHERE rider_id = $1 AND is_rider_sale = true AND balance_due > 0
                ORDER BY due_date ASC NULLS LAST, sale_date ASC, id ASC FOR UPDATE`
             : `SELECT id, balance_due FROM sales_transactions
@@ -223,7 +223,7 @@ router.post('/allocate', authenticate, async (req, res) => {
                  RETURNING id`,
                 [
                     sale.id,
-                    isRider ? null : customerId,
+                    isRider ? (sale.customer_id || null) : customerId,
                     isRider ? riderId : null,
                     pay,
                     payment_date || null,
