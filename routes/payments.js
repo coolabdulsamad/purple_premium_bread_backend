@@ -363,6 +363,8 @@ router.get('/', async (req, res) => {
             p.payment_date,
             p.payment_method,
             p.proof,
+            p.payment_reference,
+            p.receipt_image_url,
             st.id as transaction_id,
             c.fullname as customer_name
         FROM payments p
@@ -421,6 +423,8 @@ router.get('/customer/:customerId', async (req, res) => {
                 p.payment_date,
                 p.payment_method,
                 p.proof,
+                p.payment_reference,
+                p.receipt_image_url,
                 st.id as transaction_id,
                 c.fullname as customer_name
             FROM payments p
@@ -447,6 +451,9 @@ router.get('/rider/:riderId', authenticate, async (req, res) => {
                 p.amount,
                 p.payment_date,
                 p.payment_method,
+                p.proof,
+                p.payment_reference,
+                p.receipt_image_url,
                 st.id as transaction_id,
                 c.fullname as customer_name
             FROM payments p
@@ -483,7 +490,7 @@ router.get('/rider/:riderId/outstanding', async (req, res) => {
 
 // POST /api/payments/rider - Record a rider payment against a specific sale
 router.post('/rider', async (req, res) => {
-    const { transaction_id, rider_id, amount, payment_date, payment_method } = req.body;
+    const { transaction_id, rider_id, amount, payment_date, payment_method, proof } = req.body;
 
     if (!transaction_id || !rider_id || !amount) {
         return res.status(400).json({ error: 'Transaction ID, Rider ID, and amount are required.' });
@@ -505,8 +512,8 @@ router.post('/rider', async (req, res) => {
         }
 
         const paymentQuery = `
-            INSERT INTO payments (transaction_id, rider_id, customer_id, amount, payment_date, payment_method, is_rider_payment)
-            VALUES ($1, $2, $3, $4, $5, $6, true)
+            INSERT INTO payments (transaction_id, rider_id, customer_id, amount, payment_date, payment_method, proof, is_rider_payment)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, true)
             RETURNING id;
         `;
         // Resolve a non-null customer_id: prefer the sale's customer, then the rider's linked customer account.
@@ -519,7 +526,7 @@ router.post('/rider', async (req, res) => {
             await client.query('ROLLBACK');
             return res.status(400).json({ error: 'This sale has no customer and the rider has no linked customer account. Link a customer to the rider first.' });
         }
-        const paymentResult = await client.query(paymentQuery, [transaction_id, rider_id, payCustomerId, paymentAmount, payment_date, payment_method]);
+        const paymentResult = await client.query(paymentQuery, [transaction_id, rider_id, payCustomerId, paymentAmount, payment_date, payment_method, proof || null]);
         const newPaymentId = paymentResult.rows[0].id;
 
         const newBalanceDue = sale.balance_due - paymentAmount;
