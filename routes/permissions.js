@@ -15,6 +15,30 @@ function adminOnly(req, res, next) {
     next();
 }
 
+// GET /api/permissions/mine - the current user's own role permissions.
+// Open to every authenticated user (any role) so the frontend can hide/show
+// sidebar items, pages and tabs according to the live permission catalog.
+// Must be registered BEFORE router.use(adminOnly) below.
+// If the permission tables are not migrated yet, returns an empty object so
+// the frontend falls back to its built-in role defaults (fail-open).
+router.get('/mine', async (req, res) => {
+    try {
+        if (!req.user) return res.status(401).json({ error: 'Authentication required.' });
+        const role = req.user.role || 'user';
+        if (role === 'admin') return res.status(200).json({ role, admin: true, permissions: {} });
+        const result = await db.query(
+            'SELECT permission_key, is_allowed FROM role_permissions WHERE role = $1',
+            [role]
+        );
+        const permissions = {};
+        for (const row of result.rows) permissions[row.permission_key] = !!row.is_allowed;
+        res.status(200).json({ role, admin: false, permissions });
+    } catch (err) {
+        // Fail-open: migration not applied yet — frontend uses role defaults.
+        res.status(200).json({ role: req.user && req.user.role, admin: req.user && req.user.role === 'admin', permissions: {} });
+    }
+});
+
 router.use(adminOnly);
 
 // GET /api/permissions/roles - list of roles
