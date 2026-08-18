@@ -1310,52 +1310,65 @@ router.get('/rider-performance', async (req, res) => {
 router.get('/rider-payments', async (req, res) => {
     const { startDate, endDate, riderId, paymentMethod } = req.query;
 
+    // Reads from `payments` (is_rider_payment = true) — the table that ALL rider
+    // payment paths write to (web form, Pay-by-Amount auto-allocate, Telegram bot).
+    // rider_payment_history is only written by the web form, so it was missing every
+    // allocate/Telegram payment; we LEFT JOIN it (LATERAL, 1 row max) only to recover
+    // legacy notes/recorded_by for older rows.
     let query = `
         SELECT
-            rph.id AS payment_id,
+            p.id AS payment_id,
             r.fullname AS rider_name,
             r.phone_number AS rider_phone,
-            rph.payment_date,
-            rph.amount,
-            rph.payment_method,
-            rph.notes,
+            p.payment_date,
+            p.amount,
+            p.payment_method,
+            COALESCE(rph.notes, p.payment_reference, p.proof) AS notes,
             u.fullname AS recorded_by_name,
             (
                 SELECT COUNT(*) 
                 FROM sales_transactions st 
                 WHERE st.rider_id = r.id 
-                AND st.payment_method = rph.payment_method
-                AND DATE(st.sale_date) = DATE(rph.payment_date)
-            ) AS estimated_transactions
-        FROM rider_payment_history rph
-        JOIN riders r ON rph.rider_id = r.id
+                AND st.payment_method = p.payment_method
+                AND DATE(st.sale_date) = DATE(p.payment_date)
+            ) AS transactions_covered
+        FROM payments p
+        JOIN riders r ON p.rider_id = r.id
+        LEFT JOIN LATERAL (
+            SELECT rph.notes, rph.recorded_by
+            FROM rider_payment_history rph
+            WHERE rph.rider_id = p.rider_id
+              AND rph.amount = p.amount
+              AND DATE(rph.payment_date) = DATE(p.payment_date)
+            LIMIT 1
+        ) rph ON true
         LEFT JOIN users u ON rph.recorded_by = u.id
-        WHERE 1=1
+        WHERE p.is_rider_payment = true
     `;
     let params = [];
     let paramIndex = 1;
 
     if (startDate) {
-        query += ` AND rph.payment_date >= $${paramIndex++}`;
+        query += ` AND p.payment_date >= $${paramIndex++}`;
         params.push(startDate);
     }
     if (endDate) {
         const endOfDay = new Date(endDate);
         endOfDay.setDate(endOfDay.getDate() + 1);
-        query += ` AND rph.payment_date < $${paramIndex++}`;
+        query += ` AND p.payment_date < $${paramIndex++}`;
         params.push(endOfDay.toISOString());
     }
 
     if (riderId) {
-        query += ` AND rph.rider_id = $${paramIndex++}`;
+        query += ` AND p.rider_id = $${paramIndex++}`;
         params.push(parseInt(riderId));
     }
     if (paymentMethod) {
-        query += ` AND rph.payment_method ILIKE $${paramIndex++}`;
+        query += ` AND p.payment_method ILIKE $${paramIndex++}`;
         params.push(`%${paymentMethod}%`);
     }
 
-    query += ` ORDER BY rph.payment_date DESC;`;
+    query += ` ORDER BY p.payment_date DESC;`;
 
     try {
         const result = await db.query(query, params);
